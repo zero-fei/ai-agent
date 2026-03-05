@@ -1,28 +1,66 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { callLLM } from '@/lib/llm';
+import { getChatStream } from '@/lib/llm';
+import db from '@/lib/db';
+import { randomUUID } from 'crypto';
+
+export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
     if (!process.env.DASHSCOPE_API_KEY || process.env.DASHSCOPE_API_KEY === "your-api-key") {
-      return NextResponse.json({ error: "DashScope API key is not configured. Please set it in .env.local and restart the server." }, { status: 500 });
+      throw new Error("DashScope API key is not configured.");
     }
 
-    const { messages } = await req.json();
-
-    // 可以在这里添加默认的系统提示
-    const systemPrompt = { role: 'system', content: 'You are a helpful assistant.' };
-    const allMessages = [systemPrompt, ...messages];
-
-    const result = await callLLM(allMessages);
-
-    if (result.success) {
-      return NextResponse.json({ reply: result.content, usage: result.usage });
-    } else {
-      console.error("LLM call failed:", result.error);
-      return NextResponse.json({ error: `LLM Error: ${result.error}` }, { status: 500 });
+    let { messages, conversationId } = await req.json();
+    if (!messages) {
+      throw new Error("Messages are required");
     }
+
+    // If no conversationId, create a new conversation
+    if (!conversationId) {
+      conversationId = randomUUID();
+      const firstUserMessage = messages.find((m: any) => m.role === 'user');
+      const title = firstUserMessage ? firstUserMessage.content.substring(0, 50) : 'New Conversation';
+      const stmt = db.prepare('INSERT INTO conversations (id, title) VALUES (?, ?)');
+      stmt.run(conversationId, title);
+    }
+
+    // Save user message to DB
+    const lastUserMessage = messages[messages.length - 1];
+    const saveUserMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
+    saveUserMsgStmt.run(randomUUID(), conversationId, lastUserMessage.role, lastUserMessage.content);
+
+    const stream = await getChatStream(messages);
+
+    let aiResponseContent = '';
+    const encoder = new TextEncoder();
+    const readableStream = new ReadableStream({
+      async start(controller) {
+        for await (const chunk of stream) {
+          aiResponseContent += chunk;
+          controller.enqueue(encoder.encode(chunk));
+        }
+        
+        // Save AI message to DB after stream is complete
+        const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
+        saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
+
+        controller.close();
+      },
+    });
+
+    return new Response(readableStream, {
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'X-Conversation-Id': conversationId, // Send back the conversationId
+      },
+    });
+
   } catch (error: any) {
-    console.error("API route error:", error);
-    return NextResponse.json({ error: error.message || 'An unknown error occurred in the API route.' }, { status: 500 });
+    console.error("[API] Chat route error:", error);
+    return new NextResponse(JSON.stringify({ error: error.message || 'An unknown error occurred.' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 }

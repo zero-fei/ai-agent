@@ -1,60 +1,44 @@
-import { ChatOpenAI } from "@langchain/openai";
-import { HumanMessage, SystemMessage, AIMessage, BaseMessage } from "@langchain/core/messages";
+import { ChatOpenAI } from '@langchain/openai';
+import { ChatPromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts';
+import { StringOutputParser } from '@langchain/core/output_parsers';
+import { AIMessage, HumanMessage } from '@langchain/core/messages';
 
-// 定义消息类型接口
 interface Message {
-  role: 'system' | 'user' | 'assistant';
+  role: 'user' | 'assistant';
   content: string;
 }
 
-// 使用单例模式创建和管理LLM实例
-let llmInstance: ChatOpenAI | null = null;
-
-function getLLM(): ChatOpenAI {
-  if (!llmInstance) {
-    llmInstance = new ChatOpenAI({
-      apiKey: process.env.DASHSCOPE_API_KEY, // 从环境变量读取API Key
-      modelName: "qwen3.5-plus", // 默认模型
-      configuration: {
-        baseURL: process.env.DASHSCOPE_BASE_URL || 'https://coding.dashscope.aliyuncs.com/v1', // 从环境变量读取Base URL
-      }
-    });
-  }
-  return llmInstance;
-}
-
 /**
- * 调用大语言模型
- * @param messages 对话历史消息数组
- * @returns 包含调用结果的对象
+ * Creates and returns a stream of responses from the language model.
+ * @param messages The chat history messages.
+ * @returns A readable stream of the language model's response.
  */
-export async function callLLM(messages: Message[]) {
-  try {
-    const llm = getLLM();
-    
-    // 将传入的消息数组转换为LangChain的BaseMessage对象数组
-    const langChainMessages: BaseMessage[] = messages.map(msg => {
-      if (msg.role === 'system') {
-        return new SystemMessage(msg.content);
-      } else if (msg.role === 'user') {
-        return new HumanMessage(msg.content);
-      } else { // 'assistant'
-        return new AIMessage(msg.content);
-      }
-    });
+export async function getChatStream(messages: Message[]) {
+  const model = new ChatOpenAI({
+    apiKey: process.env.DASHSCOPE_API_KEY,
+    modelName: "qwen3.5-plus",
+    configuration: {
+      baseURL: process.env.DASHSCOPE_BASE_URL || 'https://coding.dashscope.aliyuncs.com/v1',
+    },
+    streaming: true,
+  });
 
-    const response = await llm.invoke(langChainMessages);
+  const prompt = ChatPromptTemplate.fromMessages([
+    ["system", "You are a helpful assistant."],
+    new MessagesPlaceholder("chat_history"),
+    ["human", "{input}"],
+  ]);
 
-    return {
-      success: true,
-      content: response.content,
-      usage: response.usage_metadata,
-    };
-  } catch (error: any) {
-    console.error("大模型调用失败：", error);
-    return {
-      success: false,
-      error: error.message || "调用大模型时发生错误",
-    };
-  }
+  const outputParser = new StringOutputParser();
+  const chain = prompt.pipe(model).pipe(outputParser);
+
+  const chatHistory = messages.slice(0, -1).map((m) =>
+    m.role === 'user' ? new HumanMessage(m.content) : new AIMessage(m.content)
+  );
+  const latestMessage = messages[messages.length - 1];
+
+  return await chain.stream({
+    chat_history: chatHistory,
+    input: latestMessage.content,
+  });
 }
