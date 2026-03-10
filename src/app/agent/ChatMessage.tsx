@@ -1,9 +1,9 @@
 "use client";
 import React from 'react';
 import { Avatar, Typography, Spin } from 'antd';
-import { UserOutlined, RobotOutlined } from '@ant-design/icons';
+import { UserOutlined } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
-import Image from 'next/image';
+import styles from './ChatMessage.module.css';
 
 interface Message {
   id: number | string;
@@ -24,22 +24,22 @@ const formatTime = (isoString: string) => {
 
 const ChatMessage: React.FC<ChatMessageProps> = ({ messages, listRef }) => {
   return (
-    <div ref={listRef} style={{ flex: 1, overflowY: 'auto', padding: '24px' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div ref={listRef} className={styles.list}>
+      <div className={styles.stack}>
         {messages.map((item) => (
-          <div key={item.id} style={{ display: 'flex', justifyContent: item.sender === 'user' ? 'flex-end' : 'flex-start' }}>
-            <div style={{ display: 'flex', gap: '12px', flexDirection: item.sender === 'user' ? 'row-reverse' : 'row', alignItems: 'flex-start' }}>
+          <div key={item.id} className={`${styles.row} ${item.sender === 'user' ? styles.rowUser : styles.rowAgent}`}>
+            <div className={`${styles.messageWrap} ${item.sender === 'user' ? styles.messageWrapUser : styles.messageWrapAgent}`}>
               <Avatar src={item.sender === 'agent' ? '/logo.png' : undefined} icon={item.sender === 'user' ? <UserOutlined /> : undefined} />
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: item.sender === 'user' ? 'flex-end' : 'flex-start' }}>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                  <Typography.Text type="secondary" style={{ fontSize: '12px' }}>
+              <div className={`${styles.metaAndBubble} ${item.sender === 'user' ? styles.metaAndBubbleUser : styles.metaAndBubbleAgent}`}>
+                <div className={styles.meta}>
+                  <Typography.Text type="secondary" className={styles.metaText}>
                     {item.sender === 'user' ? 'You' : '灵析'}
                   </Typography.Text>
-                  <Typography.Text type="secondary" style={{ fontSize: '12px' }}>
+                  <Typography.Text type="secondary" className={styles.metaText}>
                     {formatTime(item.createdAt)}
                   </Typography.Text>
                 </div>
-                <div style={{ background: item.sender === 'user' ? '#e6f7ff' : '#f0f2f5', padding: '10px 15px', borderRadius: '10px', marginTop: '4px', maxWidth: 'calc(100vw - 420px)' }}>
+                <div className={`${styles.bubble} ${item.sender === 'user' ? styles.bubbleUser : styles.bubbleAgent}`}>
                   {item.status === 'loading' && item.text === '' ? <Spin size="small" /> : <ReactMarkdown>{item.text}</ReactMarkdown>}
                 </div>
               </div>

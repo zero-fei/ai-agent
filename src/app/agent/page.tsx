@@ -1,12 +1,14 @@
 "use client";
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Layout, Input, Typography, Alert, Menu, Button, Divider, Spin } from 'antd';
-import { PlusOutlined, DatabaseOutlined, BookOutlined, MessageOutlined, MenuUnfoldOutlined, MenuFoldOutlined } from '@ant-design/icons';
+import { Layout, Input, Typography, Alert, Menu, Button, Divider, Spin, Avatar } from 'antd';
+import { PlusOutlined, DatabaseOutlined, BookOutlined, MessageOutlined, MenuUnfoldOutlined, MenuFoldOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons';
 import Image from 'next/image';
 import ChatMessage from './ChatMessage';
+import { useRouter } from 'next/navigation';
+import styles from './page.module.css';
 
 const { Sider, Content, Footer } = Layout;
-const { Title } = Typography;
+const { Title, Text } = Typography;
 const { Search } = Input;
 
 interface Message {
@@ -23,9 +25,28 @@ interface Conversation {
   createdAt: string;
 }
 
+interface User {
+  id: string;
+  username: string;
+  email: string;
+}
+
 type ActiveView = 'chat' | 'mcp' | 'knowledge';
 
+const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+type ConversationRow = Conversation;
+type MessageRow = {
+  id: number | string;
+  conversationId: string;
+  role: 'user' | 'assistant' | string;
+  content: string;
+  createdAt: string;
+};
+
 const AgentPage = () => {
+  const router = useRouter();
+  const [user, setUser] = useState<User | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [history, setHistory] = useState<Conversation[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
@@ -37,14 +58,38 @@ const AgentPage = () => {
   const [collapsed, setCollapsed] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
 
+  useEffect(() => {
+    const fetchUser = async () => {
+      try {
+        const response = await fetch('/api/auth/session');
+        const data = await response.json();
+        if (!data.user) {
+          router.push('/auth/login');
+          return;
+        }
+        setUser(data.user);
+      } catch (error) {
+        console.error('Failed to fetch user:', error);
+        router.push('/auth/login');
+      }
+    };
+    fetchUser();
+  }, [router]);
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    router.push('/auth/login');
+    router.refresh();
+  };
+
   const fetchHistory = useCallback(async () => {
     try {
       const response = await fetch('/api/conversations');
       if (!response.ok) throw new Error('Failed to fetch history');
-      const data = await response.json();
+      const data = (await response.json()) as ConversationRow[];
       setHistory(data);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(getErrorMessage(err));
     }
   }, []);
 
@@ -74,8 +119,8 @@ const AgentPage = () => {
     try {
       const response = await fetch(`/api/conversations/${conversationId}`);
       if (!response.ok) throw new Error('Failed to fetch messages');
-      const data = await response.json();
-      const formattedMessages = data.map((msg: any) => ({
+      const data = (await response.json()) as MessageRow[];
+      const formattedMessages: Message[] = data.map((msg) => ({
         id: msg.id,
         text: msg.content,
         sender: msg.role === 'user' ? 'user' : 'agent',
@@ -83,8 +128,8 @@ const AgentPage = () => {
         createdAt: msg.createdAt,
       }));
       setMessages(formattedMessages);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(getErrorMessage(err));
     } finally {
       setPageLoading(false);
     }
@@ -149,10 +194,11 @@ const AgentPage = () => {
       
       setMessages(prev => prev.map(msg => msg.id === agentMessageId ? { ...msg, status: 'done' } : msg));
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Failed to send message:', error);
-      setError(error.message);
-      setMessages(prev => prev.map(msg => msg.id === agentMessageId ? { ...msg, status: 'error', text: `Error: ${error.message}` } : msg));
+      const message = getErrorMessage(error);
+      setError(message);
+      setMessages(prev => prev.map(msg => msg.id === agentMessageId ? { ...msg, status: 'error', text: `Error: ${message}` } : msg));
     } finally {
       setLoading(false);
     }
@@ -161,7 +207,7 @@ const AgentPage = () => {
   const renderContent = () => {
     if (pageLoading) {
       return (
-        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
+        <div className={styles.loadingCenter}>
           <Spin size="large" />
         </div>
       );
@@ -171,66 +217,86 @@ const AgentPage = () => {
       case 'chat':
         return <ChatMessage messages={messages} listRef={listRef} />;
       case 'mcp':
-        return <div style={{ padding: 24 }}>MCP 管理页面（待实现）</div>;
+        return <div className={styles.placeholder}>MCP 管理页面（待实现）</div>;
       case 'knowledge':
-        return <div style={{ padding: 24 }}>知识库页面（待实现）</div>;
+        return <div className={styles.placeholder}>知识库页面（待实现）</div>;
       default:
         return null;
     }
   };
 
   return (
-    <Layout style={{ height: '100vh' }}>
+    <Layout className={styles.rootLayout}>
       <Sider
         width={260}
         theme="light"
         collapsible
         collapsed={collapsed}
         onCollapse={(value) => setCollapsed(value)}
-        trigger={null} // Hide the default trigger
-        style={{
-          borderRight: '1px solid #f0f0f0',
-          display: 'flex',
-          flexDirection: 'column',
-          padding: '16px',
-        }}
+        trigger={null}
+        className={styles.sider}
       >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', overflow: 'hidden' }}>
+        <div className={styles.siderHeader}>
+          <div className={styles.brand}>
             <Image src="/logo.png" alt="灵析 Logo" width={32} height={32} />
-            {!collapsed && <Title level={4} style={{ margin: 0, whiteSpace: 'nowrap' }}>灵析</Title>}
+            {!collapsed && <Title level={4} className={styles.brandTitle}>灵析</Title>}
           </div>
           <Button
             type="text"
             icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
             onClick={() => setCollapsed(!collapsed)}
-            style={{ fontSize: '16px' }}
+            className={styles.collapseBtn}
           />
         </div>
         <Button type="primary" icon={<PlusOutlined />} block size="large" onClick={handleNewConversation}>
           {!collapsed && '新对话'}
         </Button>
-        <Menu mode="inline" style={{ borderRight: 0, marginTop: '20px' }} onSelect={({ key }) => setActiveView(key as ActiveView)} selectedKeys={[activeView]} items={[
+        <Menu mode="inline" className={styles.mainMenu} onSelect={({ key }) => setActiveView(key as ActiveView)} selectedKeys={[activeView]} items={[
             { key: 'mcp', icon: <DatabaseOutlined />, label: 'MCP 管理' },
             { key: 'knowledge', icon: <BookOutlined />, label: '知识库' },
         ]}/>
-        <Divider style={{ margin: '20px 0' }} />
-        <div style={{ flex: 1, overflowY: 'auto' }}>
+        <Divider className={styles.siderDivider} />
+        <div className={styles.historyList}>
           {history.map(item => (
-            <div key={item.id} onClick={() => handleSelectConversation(item.id)} style={{ padding: '8px 16px', cursor: 'pointer', borderRadius: '4px', display: 'flex', justifyContent: collapsed ? 'center' : 'flex-start', alignItems: 'center', gap: '12px', backgroundColor: currentConversationId === item.id ? '#e6f7ff' : 'transparent' }} className="history-item">
+            <div
+              key={item.id}
+              onClick={() => handleSelectConversation(item.id)}
+              className={[
+                'history-item',
+                styles.historyItem,
+                collapsed ? styles.historyItemCollapsed : '',
+                currentConversationId === item.id ? styles.historyItemActive : '',
+              ].filter(Boolean).join(' ')}
+            >
               <MessageOutlined />
-              {!collapsed && <Typography.Text ellipsis style={{ flex: 1 }}>{item.title}</Typography.Text>}
+              {!collapsed && <Typography.Text ellipsis className={styles.historyTitle}>{item.title}</Typography.Text>}
             </div>
           ))}
         </div>
+        {!collapsed && user && (
+          <div className={styles.userCard}>
+            <Avatar icon={<UserOutlined />} className={styles.userAvatar} />
+            <div className={styles.userInfo}>
+              <Text strong className={styles.userName}>{user.username}</Text>
+              <Text type="secondary" ellipsis className={styles.userEmail}>{user.email}</Text>
+            </div>
+            <Button 
+              type="text"
+              icon={<LogoutOutlined />} 
+              onClick={handleLogout}
+              className={styles.logoutBtn}
+              title="退出登录"
+            />
+          </div>
+        )}
       </Sider>
       <Layout>
-        <Content style={{ margin: '24px', overflow: 'hidden', display: 'flex', flexDirection: 'column', backgroundColor: '#fff', borderRadius: '8px' }}>
+        <Content className={styles.content}>
           {renderContent()}
         </Content>
         {activeView === 'chat' && (
-          <Footer style={{ padding: '16px 24px', backgroundColor: '#fff', borderTop: '1px solid #f0f0f0' }}>
-            {error && <Alert title={error} type="error" showIcon style={{ marginBottom: '16px' }} />}
+          <Footer className={styles.footer}>
+            {error && <Alert title={error} type="error" showIcon className={styles.errorAlert} />}
             <Search placeholder="Type your message here..." enterButton="Send" size="large" value={inputValue} onChange={(e) => setInputValue(e.target.value)} onSearch={handleSendMessage} loading={loading} disabled={loading}/>
           </Footer>
         )}

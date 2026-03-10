@@ -1,0 +1,76 @@
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.row {
+  display: flex;
+}
+
+.rowUser {
+  justify-content: flex-end;
+}
+
+.rowAgent {
+  justify-content: flex-start;
+}
+
+.messageWrap {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.messageWrapUser {
+  flex-direction: row-reverse;
+}
+
+.messageWrapAgent {
+  flex-direction: row;
+}
+
+.metaAndBubble {
+  display: flex;
+  flex-direction: column;
+}
+
+.metaAndBubbleUser {
+  align-items: flex-end;
+}
+
+.metaAndBubbleAgent {
+  align-items: flex-start;
+}
+
+.meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.metaText {
+  font-size: 12px;
+}
+
+.bubble {
+  padding: 10px 15px;
+  border-radius: 10px;
+  margin-top: 4px;
+  max-width: calc(100vw - 420px);
+  word-break: break-word;
+}
+
+.bubbleUser {
+  background: #e6f7ff;
+}
+
+.bubbleAgent {
+  background: #f0f2f5;
+}
