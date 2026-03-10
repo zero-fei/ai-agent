@@ -1,4 +1,4 @@
-## zx-ai-agent / agent-app
+## ai-agent-app
 
 一个基于 **Next.js App Router** 的「对话式 AI Agent」Web 应用，内置登录/注册、会话管理、对话历史、流式输出等能力，后续可扩展 MCP 管理与知识库能力。
 
