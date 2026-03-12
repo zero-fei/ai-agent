@@ -54,7 +54,7 @@ type KbChunkRow = {
  * 把配置集中在这里，避免模型/URL 变更散落在代码各处。
  */
 const getEmbeddingsClient = () => {
-  const apiKey = process.env.DASHSCOPE_API_KEY;
+  const apiKey = process.env.DASHSCOPE_API_KEY_EMBEDDINGS;
   if (!apiKey || apiKey === 'your-api-key') {
     throw new Error('DashScope API key is not configured.');
   }
@@ -66,7 +66,7 @@ const getEmbeddingsClient = () => {
       baseURL:
         process.env.DASHSCOPE_EMBEDDINGS_BASE_URL ||
         process.env.DASHSCOPE_BASE_URL ||
-        'https://coding.dashscope.aliyuncs.com/v1',
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
     },
   });
 };
