@@ -1,9 +1,10 @@
 "use client";
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Layout, Input, Typography, Alert, Menu, Button, Divider, Spin, Avatar } from 'antd';
-import { PlusOutlined, DatabaseOutlined, BookOutlined, MessageOutlined, MenuUnfoldOutlined, MenuFoldOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons';
+import { Layout, Input, Typography, Alert, Menu, Button, Divider, Spin, Avatar, Select } from 'antd';
+import { PlusOutlined, DatabaseOutlined, BookOutlined, MessageOutlined, MenuUnfoldOutlined, MenuFoldOutlined, LogoutOutlined, UserOutlined, ArrowUpOutlined } from '@ant-design/icons';
 import Image from 'next/image';
 import ChatMessage from './ChatMessage';
+import KnowledgeView from './KnowledgeView';
 import { useRouter } from 'next/navigation';
 import styles from './page.module.css';
 
@@ -44,6 +45,16 @@ type MessageRow = {
   createdAt: string;
 };
 
+// 根据本地时间生成问候语
+const getGreetingText = () => {
+  if (typeof window === 'undefined') return '你好';
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour < 12) return '早上好';
+  if (hour >= 12 && hour < 14) return '中午好';
+  if (hour >= 14 && hour < 19) return '下午好';
+  return '晚上好';
+};
+
 const AgentPage = () => {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
@@ -57,6 +68,9 @@ const AgentPage = () => {
   const [activeView, setActiveView] = useState<ActiveView>('chat');
   const [collapsed, setCollapsed] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const [greeting, setGreeting] = useState('你好');
+  const [collectionsForChat, setCollectionsForChat] = useState<{ id: string; name: string }[]>([]);
+  const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -96,6 +110,26 @@ const AgentPage = () => {
   useEffect(() => {
     fetchHistory();
   }, [fetchHistory]);
+
+  // 为避免 SSR 与客户端首次渲染不一致，问候语只在客户端计算一次
+  useEffect(() => {
+    setGreeting(getGreetingText());
+  }, []);
+
+  // 加载可用于聊天选择的知识库集合
+  useEffect(() => {
+    const fetchCollectionsForChat = async () => {
+      try {
+        const res = await fetch('/api/kb/collections');
+        if (!res.ok) return;
+        const data = (await res.json()) as Array<{ id: string; name: string }>;
+        setCollectionsForChat(data);
+      } catch {
+        // ignore
+      }
+    };
+    fetchCollectionsForChat();
+  }, []);
 
   useEffect(() => {
     if (listRef.current) {
@@ -162,7 +196,8 @@ const AgentPage = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           messages: newMessages.map(m => ({ role: m.sender, content: m.text })),
-          conversationId: currentConversationId 
+          conversationId: currentConversationId,
+          collectionId: selectedCollectionId,
         }),
       });
 
@@ -215,11 +250,64 @@ const AgentPage = () => {
 
     switch (activeView) {
       case 'chat':
+        // 空状态欢迎页：没有消息时展示欢迎与输入框（更像“默认对话页面”）
+        if (messages.length === 0) {
+          const baseGreeting = greeting;
+          const finalGreeting = user?.username ? `${baseGreeting}，${user.username}` : baseGreeting;
+          return (
+            <div className={styles.welcomeWrap}>
+              <div className={styles.welcomeInner}>
+                <div className={styles.welcomeHeader}>
+                  <div className={styles.welcomeText}>
+                    <Typography.Title level={2} className={styles.welcomeTitle}>
+                      {finalGreeting}
+                    </Typography.Title>
+                    <Typography.Text type="secondary">
+                      有什么我可以帮你的？
+                    </Typography.Text>
+                  </div>
+                </div>
+
+                <div className={styles.welcomeInputRow}>
+                  <div className={styles.inputWithSend}>
+                    <Input
+                      placeholder="请输入你的问题…"
+                      size="large"
+                      value={inputValue}
+                      onChange={(e) => setInputValue(e.target.value)}
+                      onPressEnter={() => handleSendMessage(inputValue)}
+                      disabled={loading}
+                      className={styles.textInput}
+                    />
+                    <Button
+                      type="primary"
+                      size="large"
+                      icon={<ArrowUpOutlined />}
+                      loading={loading}
+                      disabled={loading}
+                      onClick={() => handleSendMessage(inputValue)}
+                      className={styles.sendBtn}
+                      aria-label="发送"
+                    />
+                  </div>
+                  {error && (
+                    <Alert
+                      title={error}
+                      type="error"
+                      showIcon
+                      className={styles.welcomeError}
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        }
         return <ChatMessage messages={messages} listRef={listRef} />;
       case 'mcp':
         return <div className={styles.placeholder}>MCP 管理页面（待实现）</div>;
       case 'knowledge':
-        return <div className={styles.placeholder}>知识库页面（待实现）</div>;
+        return <KnowledgeView />;
       default:
         return null;
     }
@@ -294,10 +382,41 @@ const AgentPage = () => {
         <Content className={styles.content}>
           {renderContent()}
         </Content>
-        {activeView === 'chat' && (
+        {/* Welcome 空状态页已自带输入框，因此 messages 为空时隐藏底部输入栏 */}
+        {activeView === 'chat' && messages.length > 0 && (
           <Footer className={styles.footer}>
             {error && <Alert title={error} type="error" showIcon className={styles.errorAlert} />}
-            <Search placeholder="Type your message here..." enterButton="Send" size="large" value={inputValue} onChange={(e) => setInputValue(e.target.value)} onSearch={handleSendMessage} loading={loading} disabled={loading}/>
+            <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'flex-end' }}>
+              <Select
+                allowClear
+                placeholder="选择本轮对话使用的知识库（可选）"
+                style={{ width: 320 }}
+                value={selectedCollectionId ?? undefined}
+                onChange={(value) => setSelectedCollectionId(value ?? null)}
+                options={collectionsForChat.map((c) => ({ label: c.name, value: c.id }))}
+              />
+            </div>
+            <div className={styles.inputWithSend}>
+              <Input
+                placeholder="Type your message here..."
+                size="large"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onPressEnter={() => handleSendMessage(inputValue)}
+                disabled={loading}
+                className={styles.textInput}
+              />
+              <Button
+                type="primary"
+                size="large"
+                icon={<ArrowUpOutlined />}
+                loading={loading}
+                disabled={loading}
+                onClick={() => handleSendMessage(inputValue)}
+                className={styles.sendBtn}
+                aria-label="Send"
+              />
+            </div>
           </Footer>
         )}
       </Layout>

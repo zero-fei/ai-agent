@@ -3,9 +3,19 @@ import { getChatStream } from '@/lib/llm';
 import db from '@/lib/db';
 import { randomUUID } from 'crypto';
 import { getSession } from '@/lib/auth';
+import { buildRagSystemPrompt, kbSearch } from '@/lib/rag';
 
 export const dynamic = 'force-dynamic';
 
+/**
+ * Chat API（流式输出）。
+ *
+ * 职责：
+ * - Cookie Session 鉴权
+ * - 对话/消息落库（SQLite）
+ * - 向客户端流式返回 LLM 输出
+ * - RAG：从知识库检索上下文并注入到 system prompt
+ */
 type IncomingMessage = {
   role: string;
   content: string;
@@ -14,6 +24,7 @@ type IncomingMessage = {
 type ChatRequestBody = {
   messages: IncomingMessage[];
   conversationId?: string | null;
+  collectionId?: string | null;
 };
 
 const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -42,13 +53,13 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json()) as ChatRequestBody;
-    const { messages } = body;
+    const { messages, collectionId = null } = body;
     let conversationId = body.conversationId ?? undefined;
     if (!messages) {
       throw new Error("Messages are required");
     }
 
-    // If no conversationId, create a new conversation
+    // 若没有 conversationId，则创建新会话（title 取第一条用户消息的前 50 字）。
     if (!conversationId) {
       conversationId = randomUUID();
       const firstUserMessage = messages.find((m) => m.role === 'user');
@@ -57,7 +68,7 @@ export async function POST(req: NextRequest) {
       stmt.run(conversationId, user.id, title);
     }
 
-    // Save user message to DB
+    // 先保存用户消息，保证即使后续流式输出失败也有可追溯记录。
     const lastUserMessage = messages[messages.length - 1];
     const saveUserMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
     saveUserMsgStmt.run(randomUUID(), conversationId, lastUserMessage.role, lastUserMessage.content);
@@ -71,7 +82,17 @@ export async function POST(req: NextRequest) {
       throw new Error('No valid messages for LLM.');
     }
 
-    const stream = await getChatStream(llmMessages);
+    const latestUser = llmMessages[llmMessages.length - 1]!;
+    // RAG 检索：
+    // - 支持客户端透传 collectionId，用于“每个会话选择知识库/集合”
+    const hits = await kbSearch({ userId: user.id, collectionId, query: latestUser.content, topK: 5 });
+    const ragSystemPrompt = buildRagSystemPrompt({
+      query: latestUser.content,
+      hits: hits.map((h) => ({ content: h.content, score: h.score })),
+    });
+
+    // 通过覆盖 system prompt 注入检索上下文（不改变前端消息结构）。
+    const stream = await getChatStream(llmMessages, { systemPrompt: ragSystemPrompt ?? undefined });
 
     let aiResponseContent = '';
     const encoder = new TextEncoder();
@@ -82,7 +103,7 @@ export async function POST(req: NextRequest) {
           controller.enqueue(encoder.encode(chunk));
         }
         
-        // Save AI message to DB after stream is complete
+        // 流式输出完成后再保存 AI 回复（单条记录保存完整内容）。
         const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
         saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
 

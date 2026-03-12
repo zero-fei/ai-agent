@@ -1,3 +1,4 @@
+/* Tailwind v4：官方推荐写法（由 PostCSS/Tailwind 处理）。 */
 @import "tailwindcss";
 
 :root {

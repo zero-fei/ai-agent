@@ -1,12 +1,21 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 
-// Define the path for the database file.
-// It's good practice to place it outside the source code, e.g., in the project root.
+/**
+ * SQLite 连接与建表/迁移初始化。
+ *
+ * 为了部署简单，本项目使用本地 SQLite 文件（`database.db`）。
+ * 模块加载时会确保：
+ * - 必要的表存在
+ * - 执行轻量级迁移（升级版本时补充新列）
+ * - 尽力创建索引与 FTS（失败不影响主流程）
+ *
+ * 注意：Next.js 在 build/runtime 期间可能多次评估模块，
+ * 所以这里用 `global.db` 复用单例连接，避免重复打开连接。
+ */
 const dbPath = path.resolve(process.cwd(), 'database.db');
 
-// Create a new database connection.
-// `verbose: console.log` is useful for debugging during development.
+// `verbose: console.log` 会比较吵，但对排查建表/迁移问题很有帮助。
 const db = new Database(dbPath, { verbose: console.log });
 
 // Use singleton pattern to ensure only one database connection is active.
@@ -15,10 +24,21 @@ if (!global.db) {
   global.db = db;
 }
 
-/**
- * Initializes the database and creates tables if they don't exist.
- */
+/** 初始化 schema，并执行安全的轻量迁移。 */
 function initializeDatabase() {
+  /**
+   * 用于简单迁移：判断列是否存在。
+   * 这里刻意只做最小迁移（仅 ALTER TABLE ADD COLUMN），避免复杂迁移带来的风险。
+   */
+  const columnExists = (table: string, column: string) => {
+    try {
+      const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      return rows.some((r) => r.name === column);
+    } catch {
+      return false;
+    }
+  };
+
   // Create 'users' table
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -62,6 +82,86 @@ function initializeDatabase() {
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (conversationId) REFERENCES conversations (id) ON DELETE CASCADE
     )
+  `);
+
+  // Knowledge base: documents
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS kb_documents (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      collectionId TEXT,
+      name TEXT NOT NULL,
+      source TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES users (id) ON DELETE CASCADE
+    )
+  `);
+
+  // Knowledge base: collections (a.k.a. knowledge bases)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS kb_collections (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      config TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES users (id) ON DELETE CASCADE
+    )
+  `);
+
+  // Knowledge base: chunks + embeddings
+  // embedding is stored as JSON stringified number[] for portability.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS kb_chunks (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      collectionId TEXT,
+      documentId TEXT NOT NULL,
+      content TEXT NOT NULL,
+      embedding TEXT NOT NULL,
+      metadata TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES users (id) ON DELETE CASCADE,
+      FOREIGN KEY (documentId) REFERENCES kb_documents (id) ON DELETE CASCADE
+    )
+  `);
+
+  // Migrations for existing DBs (CREATE TABLE IF NOT EXISTS does not add columns).
+  if (!columnExists('kb_documents', 'collectionId')) {
+    // 老库在引入“多集合”之前没有该列，需要补上。
+    db.exec(`ALTER TABLE kb_documents ADD COLUMN collectionId TEXT;`);
+  }
+  if (!columnExists('kb_chunks', 'collectionId')) {
+    // kb_chunks 同理。
+    db.exec(`ALTER TABLE kb_chunks ADD COLUMN collectionId TEXT;`);
+  }
+  if (!columnExists('kb_collections', 'config')) {
+    db.exec(`ALTER TABLE kb_collections ADD COLUMN config TEXT;`);
+  }
+
+  // 用于大规模检索的候选召回（可选）。
+  // 如果运行环境 SQLite 不支持 FTS5，仍然继续运行，`kbSearch()` 会回退到向量扫描。
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
+        content,
+        chunkId UNINDEXED,
+        userId UNINDEXED,
+        collectionId UNINDEXED,
+        documentId UNINDEXED
+      );
+    `);
+  } catch (e) {
+    console.warn('FTS5 not available, kb_chunks_fts not created:', e);
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_kb_chunks_userId ON kb_chunks(userId);
+    CREATE INDEX IF NOT EXISTS idx_kb_chunks_user_collection ON kb_chunks(userId, collectionId);
+    CREATE INDEX IF NOT EXISTS idx_kb_chunks_documentId ON kb_chunks(documentId);
+    CREATE INDEX IF NOT EXISTS idx_kb_documents_user_collection ON kb_documents(userId, collectionId);
+    CREATE INDEX IF NOT EXISTS idx_kb_collections_userId ON kb_collections(userId);
   `);
 
   console.log("Database initialized successfully.");

@@ -84,3 +84,48 @@ npm run lint
 - **数据库**：默认使用本地 SQLite 文件（仓库中可见 `database.db`）。生产部署建议使用持久化存储，并按需迁移到独立 DB 服务。
 - **鉴权**：API 主要通过 `auth-token` cookie 识别用户，会话在请求中会自动续期。
 - **消息角色**：LLM 输入目前只接收 `user/assistant` 角色（会过滤掉其它 role），如需 `system` 消息请同步扩展 `src/lib/llm.ts` 的消息类型与 prompt 组装逻辑。
+
+### RAG 知识库（已接入）
+
+本项目已内置一个最小可用的 RAG 流程：**文本入库（切分→向量化→SQLite 落盘）**，对话时自动 **向量召回→拼到 system prompt**。
+
+#### 环境变量
+
+在 `.env.local` 中追加：
+
+```bash
+# 向量化模型（可选）
+DASHSCOPE_EMBEDDING_MODEL=text-embedding-v3
+
+# embeddings baseURL（可选；默认复用 DASHSCOPE_BASE_URL）
+DASHSCOPE_EMBEDDINGS_BASE_URL=https://coding.dashscope.aliyuncs.com/v1
+```
+
+#### API
+
+- **集合（多知识库/多集合）**
+  - 创建集合：`POST /api/knowledge/collections` body: `{ "name": "xxx", "description": "可选" }`
+  - 集合列表：`GET /api/knowledge/collections`
+  - 删除集合：`DELETE /api/knowledge/collections/{id}`（会级联清理该集合下 documents/chunks）
+
+- **入库（文本）**：`POST /api/knowledge/documents`
+  - body: `{ "name": "xxx", "text": "..." , "source": "可选", "collectionId": "可选" }`
+- **文档列表**：`GET /api/knowledge/documents`
+-  - query: `?collectionId=xxx`（可选，不传表示默认集合）
+- **删除文档**：`DELETE /api/knowledge/documents/{id}`
+- **上传文件入库（PDF/DOCX/MD/TXT）**：`POST /api/knowledge/upload`（`multipart/form-data`）
+  - fields:
+    - `file`: 文件
+    - `name`: 可选（默认取文件名）
+    - `source`: 可选
+    - `collectionId`: 可选
+- **检索（调试用）**：`POST /api/knowledge/query`
+  - body: `{ "query": "..." , "topK": 5 }`
+
+#### 对话如何使用
+
+无需改前端：调用 `/api/chat` 时会对最后一条用户问题做知识库召回，并把召回片段拼到 system prompt 里。
+
+#### 大规模检索优化
+
+默认会优先使用 SQLite **FTS5** 做候选召回（快），再对候选做余弦精排；如果运行环境 SQLite 不支持 FTS5，会自动回退到向量全表扫描（小数据可用）。
