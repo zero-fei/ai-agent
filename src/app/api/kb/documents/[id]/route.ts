@@ -6,7 +6,7 @@ const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : 
 
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
     const token = req.cookies.get('auth-token')?.value;
@@ -18,7 +18,10 @@ export async function DELETE(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { id } = params;
+    const { id } = await context.params;
+    if (!id) {
+      return NextResponse.json({ error: 'Document id is required' }, { status: 400 });
+    }
     const result = kbDeleteDocument({ userId: user.id, documentId: id });
     return NextResponse.json(result);
   } catch (error: unknown) {

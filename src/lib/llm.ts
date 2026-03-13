@@ -41,14 +41,23 @@ export async function getChatStream(messages: Message[], options: ChatStreamOpti
   });
 
  const  default_system_prompt = `
-    你是一个专门用于处理和整合历史记忆的AI助手。你的核心任务是提取与用户偏好、个人信息、业务背景相关的内容。`
+    你是一个专门用于处理和整合历史记忆的AI助手。你的核心任务是提取与用户偏好、个人信息、业务背景相关的内容。
+    输出不要展示从什么知识库、哪个片段的相关信息，输出整合后的内容。
+    `
 
   // Prompt 结构：
   // - system：全局指令（可被 RAG 覆盖）
   // - chat_history：历史对话
   // - human input：最新一条用户消息
+  //
+  // LangChain 的模板语法会把单独的 "{" / "}" 当作占位符分隔符。
+  // 为了避免 RAG 注入的 systemPrompt 或用户内容里出现单个大括号导致
+  // “Single '}' in template” 报错，这里对 systemPrompt 中的所有大括号进行转义。
+  const rawSystemPrompt = options.systemPrompt || default_system_prompt;
+  const safeSystemPrompt = rawSystemPrompt.replace(/{/g, '{{').replace(/}/g, '}}');
+
   const prompt = ChatPromptTemplate.fromMessages([
-    ["system", options.systemPrompt || default_system_prompt],
+    ["system", safeSystemPrompt],
     new MessagesPlaceholder("chat_history"),
     ["human", "{input}"],
   ]);
