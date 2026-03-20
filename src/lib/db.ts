@@ -18,6 +18,9 @@ const dbPath = path.resolve(process.cwd(), 'database.db');
 // `verbose: console.log` 会比较吵，但对排查建表/迁移问题很有帮助。
 const db = new Database(dbPath, { verbose: console.log });
 
+// SQLite 默认不启用外键约束，这里显式开启以确保 ON DELETE CASCADE 生效。
+db.pragma('foreign_keys = ON');
+
 // Use singleton pattern to ensure only one database connection is active.
 // This is a simplified approach for Next.js where modules can be re-evaluated.
 if (!global.db) {

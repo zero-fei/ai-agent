@@ -73,6 +73,7 @@ const KnowledgeView: React.FC = () => {
   const [newColDesc, setNewColDesc] = useState("");
 
   const [createDocVisible, setCreateDocVisible] = useState(false);
+  const [uploadDocVisible, setUploadDocVisible] = useState(false);
   const [newDocName, setNewDocName] = useState("");
   const [newDocText, setNewDocText] = useState("");
   const [uploadingFile, setUploadingFile] = useState(false);
@@ -277,6 +278,9 @@ const KnowledgeView: React.FC = () => {
             const data = await res.json().catch(() => ({}));
             throw new Error(data.error || "删除文档失败");
           }
+          // 本地立即移除，提升交互反馈；后端也会同步删除对应 chunks。
+          setDocuments((prev) => prev.filter((doc) => doc.id !== id));
+          // 再次从服务端拉取，确保状态与数据库一致。
           await fetchDocuments(activeCollectionId);
           message.success("文档已删除");
         } catch (e) {
@@ -387,6 +391,12 @@ const KnowledgeView: React.FC = () => {
         </div>
         <Space>
           <Button onClick={() => setCreateColVisible(true)}>新建知识库</Button>
+          <Button
+            disabled={!activeCollectionId}
+            onClick={() => setUploadDocVisible(true)}
+          >
+            上传文档入库
+          </Button>
           <Button
             type="primary"
             disabled={!activeCollectionId}
@@ -668,7 +678,7 @@ const KnowledgeView: React.FC = () => {
         />
       </Modal>
 
-      {/* 新建文档 Modal + 文本清洗/分段预览 */}
+      {/* 新建文档 Modal（手动文本 + 预览） */}
       <Modal
         title="新建文档"
         open={createDocVisible}
@@ -681,21 +691,13 @@ const KnowledgeView: React.FC = () => {
         className={styles.kbNewDocModal}
       >
         <div className={styles.kbNewDocBody}>
-          <Space direction="vertical" style={{ width: "100%" }} size="middle">
+          <Space direction="vertical" style={{ width: "100%" }} size="large">
             <Alert
               type="info"
               showIcon
-              message="你可以粘贴文本，或通过下方按钮上传 TXT、Markdown（.md）文件并入库（暂不支持 PDF/Word）。"
+              title="手动粘贴文本后创建入库"
+              description="填写标题和原始内容，系统会按当前知识库的清洗与分段设置切分并入库。"
             />
-            <Upload
-              beforeUpload={handleUpload}
-              showUploadList={false}
-              accept=".txt,.md,.markdown"
-            >
-              <Button icon={<UploadOutlined />} loading={uploadingFile}>
-                上传文件并入库
-              </Button>
-            </Upload>
             <Input
               placeholder="文档标题"
               value={newDocName}
@@ -749,6 +751,37 @@ const KnowledgeView: React.FC = () => {
                 )}
               </Card>
             </div>
+          </Space>
+        </div>
+      </Modal>
+
+      {/* 上传文档入库 Modal（直接入库，不回填表单） */}
+      <Modal
+        title="上传文档并入库"
+        open={uploadDocVisible}
+        onCancel={() => setUploadDocVisible(false)}
+        footer={null}
+        width={600}
+        destroyOnClose
+        className={styles.kbNewDocModal}
+      >
+        <div className={styles.kbNewDocBody}>
+          <Space direction="vertical" style={{ width: "100%" }} size="large">
+            <Alert
+              type="info"
+              showIcon
+              title="上传 TXT / Markdown 文件并入库"
+              description="选择文件后，系统会直接切分并写入当前选中的知识库，不会在下方展示原文内容。"
+            />
+            <Upload
+              beforeUpload={handleUpload}
+              showUploadList={false}
+              accept=".txt,.md,.markdown"
+            >
+              <Button icon={<UploadOutlined />} loading={uploadingFile}>
+                上传文件并入库
+              </Button>
+            </Upload>
           </Space>
         </div>
       </Modal>

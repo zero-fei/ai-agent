@@ -363,12 +363,22 @@
 .kbNewDocBody {
   background-color: #fff;
   padding: 16px 20px;
-  border-radius: 8px;
 }
 
 .kbNewDocModal :global(.ant-modal-content) {
-  background: rgba(255, 255, 255, 0.96);
-  backdrop-filter: blur(4px);
+  background: #ffffff;
+  padding: 10px;
+}
+
+.kbNewDocModal :global(.ant-modal-footer) {
+  background-color: #ffffff;
+  border-top: 1px solid #f0f0f0;
+  padding: 10px;
+}
+
+.kbNewDocModal :global(.ant-modal-header) {
+  background-color: #ffffff;
+  padding: 10px;
 }
 
 

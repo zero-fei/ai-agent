@@ -203,6 +203,8 @@ export function kbDeleteDocument(params: { userId: string; documentId: string })
     // ignore
   }
 
+  // 显式删除 chunks，兼容未开启外键约束或历史数据库。
+  db.prepare('DELETE FROM kb_chunks WHERE userId = ? AND documentId = ?').run(userId, documentId);
   db.prepare('DELETE FROM kb_documents WHERE id = ? AND userId = ?').run(documentId, userId);
   return { deleted: true };
 }
