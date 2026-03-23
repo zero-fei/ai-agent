@@ -83,6 +83,18 @@
   min-width: 0;
 }
 
+.historyItemActions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  opacity: 0;
+  transition: opacity 0.15s ease-in-out;
+}
+
+.historyItem:hover .historyItemActions {
+  opacity: 1;
+}
+
 .userCard {
   display: flex;
   align-items: center;

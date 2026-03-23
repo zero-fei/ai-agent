@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Layout, Input, Typography, Alert, Menu, Button, Divider, Spin, Avatar, Select } from 'antd';
-import { PlusOutlined, DatabaseOutlined, BookOutlined, MessageOutlined, MenuUnfoldOutlined, MenuFoldOutlined, LogoutOutlined, UserOutlined, ArrowUpOutlined } from '@ant-design/icons';
+import { Layout, Input, Typography, Alert, Menu, Button, Divider, Spin, Avatar, Select, Modal } from 'antd';
+import { PlusOutlined, DatabaseOutlined, BookOutlined, MessageOutlined, MenuUnfoldOutlined, MenuFoldOutlined, LogoutOutlined, UserOutlined, ArrowUpOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
 import Image from 'next/image';
 import ChatMessage from './ChatMessage';
 import KnowledgeView from './KnowledgeView';
@@ -10,7 +10,6 @@ import styles from './page.module.css';
 
 const { Sider, Content, Footer } = Layout;
 const { Title, Text } = Typography;
-const { Search } = Input;
 
 interface Message {
   id: number | string;
@@ -71,6 +70,10 @@ const AgentPage = () => {
   const [greeting, setGreeting] = useState('你好');
   const [collectionsForChat, setCollectionsForChat] = useState<{ id: string; name: string }[]>([]);
   const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null);
+  const [renameModalOpen, setRenameModalOpen] = useState(false);
+  const [renameConversationId, setRenameConversationId] = useState<string | null>(null);
+  const [renameTitle, setRenameTitle] = useState('');
+  const [renameLoading, setRenameLoading] = useState(false);
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -142,6 +145,74 @@ const AgentPage = () => {
     setMessages([]);
     setError(null);
     setActiveView('chat');
+  };
+
+  const openRenameConversation = (conversationId: string) => {
+    const conv = history.find((h) => h.id === conversationId);
+    setRenameConversationId(conversationId);
+    setRenameTitle(conv?.title ?? '');
+    setRenameModalOpen(true);
+    setRenameLoading(false);
+  };
+
+  const handleRenameConversation = async () => {
+    if (!renameConversationId) return;
+    const trimmedTitle = renameTitle.trim();
+    if (!trimmedTitle) {
+      setError('对话标题不能为空');
+      return;
+    }
+
+    setRenameLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/conversations/${renameConversationId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: trimmedTitle }),
+      });
+
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error((data && (data as { error?: string }).error) || 'Failed to rename conversation');
+      }
+
+      setRenameModalOpen(false);
+      setRenameConversationId(null);
+      setRenameTitle('');
+      await fetchHistory();
+    } catch (err: unknown) {
+      setError(getErrorMessage(err));
+    } finally {
+      setRenameLoading(false);
+    }
+  };
+
+  const handleDeleteConversation = (conversationId: string) => {
+    Modal.confirm({
+      title: '删除会话？',
+      content: '删除后会清理该会话的所有消息。',
+      okText: '删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await fetch(`/api/conversations/${conversationId}`, { method: 'DELETE' });
+          const data = await res.json().catch(() => null);
+          if (!res.ok) {
+            throw new Error((data && (data as { error?: string }).error) || 'Failed to delete conversation');
+          }
+
+          if (currentConversationId === conversationId) {
+            handleNewConversation();
+          }
+
+          await fetchHistory();
+        } catch (err: unknown) {
+          setError(getErrorMessage(err));
+        }
+      },
+    });
   };
 
   const handleSelectConversation = async (conversationId: string) => {
@@ -218,15 +289,35 @@ const AgentPage = () => {
       const decoder = new TextDecoder();
       let done = false;
       let fullText = '';
+      let pendingText = '';
+      let rafId: number | null = null;
+
+      const flushPendingText = () => {
+        const textToApply = pendingText;
+        setMessages(prev => prev.map(msg => msg.id === agentMessageId ? { ...msg, text: textToApply } : msg));
+      };
 
       while (!done) {
         const { value, done: readerDone } = await reader.read();
         done = readerDone;
         const chunk = decoder.decode(value, { stream: true });
         fullText += chunk;
-        setMessages(prev => prev.map(msg => msg.id === agentMessageId ? { ...msg, text: fullText } : msg));
+        pendingText = fullText;
+
+        if (rafId === null) {
+          rafId = window.requestAnimationFrame(() => {
+            rafId = null;
+            flushPendingText();
+          });
+        }
       }
-      
+
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      flushPendingText();
+
       setMessages(prev => prev.map(msg => msg.id === agentMessageId ? { ...msg, status: 'done' } : msg));
 
     } catch (error: unknown) {
@@ -358,6 +449,29 @@ const AgentPage = () => {
             >
               <MessageOutlined />
               {!collapsed && <Typography.Text ellipsis className={styles.historyTitle}>{item.title}</Typography.Text>}
+              {!collapsed && (
+                <div className={styles.historyItemActions}>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<EditOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openRenameConversation(item.id);
+                    }}
+                  />
+                  <Button
+                    type="text"
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteConversation(item.id);
+                    }}
+                  />
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -420,6 +534,28 @@ const AgentPage = () => {
           </Footer>
         )}
       </Layout>
+      <Modal
+        title="重命名会话"
+        open={renameModalOpen}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={renameLoading}
+        onOk={handleRenameConversation}
+        onCancel={() => {
+          setRenameModalOpen(false);
+          setRenameConversationId(null);
+          setRenameTitle('');
+          setRenameLoading(false);
+        }}
+        destroyOnClose
+      >
+        <Input
+          value={renameTitle}
+          onChange={(e) => setRenameTitle(e.target.value)}
+          placeholder="请输入新的标题"
+          autoFocus
+        />
+      </Modal>
     </Layout>
   );
 };

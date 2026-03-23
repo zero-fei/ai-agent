@@ -228,6 +228,7 @@ export async function kbSearch(params: {
   const { userId, collectionId = null, query, topK = 5, candidateK = 50 } = params;
   if (!query?.trim()) return [];
 
+  const boundedCandidateK = Math.max(10, Math.min(500, candidateK));
   const qEmbedding = await getEmbeddingsClient().embedQuery(query);
 
   // 1) Candidate recall via FTS (fast) when available
@@ -242,7 +243,7 @@ export async function kbSearch(params: {
            AND collectionId IS ?
          LIMIT ?`
       )
-      .all(query, userId, collectionId, Math.max(10, Math.min(500, candidateK))) as Array<{ chunkId: string }>;
+      .all(query, userId, collectionId, boundedCandidateK) as Array<{ chunkId: string }>;
     candidateChunkIds = ftsRows.map((r) => r.chunkId);
   } catch {
     candidateChunkIds = null;

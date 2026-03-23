@@ -37,7 +37,14 @@ type LlmMessage = {
 const isLlmRole = (role: string): role is LlmMessage['role'] => role === 'user' || role === 'assistant';
 
 export async function POST(req: NextRequest) {
+  const t0 = Date.now();
   try {
+    let tAfterAuth = 0;
+    let tAfterSaveUserMsg = 0;
+    let tAfterKbSearch = 0;
+    let tAfterLlmStart = 0;
+    let firstTokenAt = 0;
+
     const token = req.cookies.get('auth-token')?.value;
     if (!token) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -47,6 +54,7 @@ export async function POST(req: NextRequest) {
     if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    tAfterAuth = Date.now();
 
     if (!process.env.DASHSCOPE_API_KEY || process.env.DASHSCOPE_API_KEY === "your-api-key") {
       throw new Error("DashScope API key is not configured.");
@@ -72,6 +80,7 @@ export async function POST(req: NextRequest) {
     const lastUserMessage = messages[messages.length - 1];
     const saveUserMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
     saveUserMsgStmt.run(randomUUID(), conversationId, lastUserMessage.role, lastUserMessage.content);
+    tAfterSaveUserMsg = Date.now();
 
     const llmMessages: LlmMessage[] = messages
       .filter((m): m is IncomingMessage => typeof m?.role === 'string' && typeof m?.content === 'string')
@@ -86,6 +95,7 @@ export async function POST(req: NextRequest) {
     // RAG 检索：
     // - 支持客户端透传 collectionId，用于“每个会话选择知识库/集合”
     const hits = await kbSearch({ userId: user.id, collectionId, query: latestUser.content, topK: 5 });
+    tAfterKbSearch = Date.now();
     const ragSystemPrompt = buildRagSystemPrompt({
       query: latestUser.content,
       hits: hits.map((h) => ({ content: h.content, score: h.score })),
@@ -93,12 +103,14 @@ export async function POST(req: NextRequest) {
 
     // 通过覆盖 system prompt 注入检索上下文（不改变前端消息结构）。
     const stream = await getChatStream(llmMessages, { systemPrompt: ragSystemPrompt ?? undefined });
+    tAfterLlmStart = Date.now();
 
     let aiResponseContent = '';
     const encoder = new TextEncoder();
     const readableStream = new ReadableStream({
       async start(controller) {
         for await (const chunk of stream) {
+          if (!firstTokenAt) firstTokenAt = Date.now();
           aiResponseContent += chunk;
           controller.enqueue(encoder.encode(chunk));
         }
@@ -106,6 +118,11 @@ export async function POST(req: NextRequest) {
         // 流式输出完成后再保存 AI 回复（单条记录保存完整内容）。
         const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
         saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
+
+        const tDone = Date.now();
+        console.log(
+          `[chat-timing] total=${tDone - t0}ms auth=${tAfterAuth - t0}ms saveUser=${tAfterSaveUserMsg - tAfterAuth}ms kb=${tAfterKbSearch - tAfterSaveUserMsg}ms llmStart=${tAfterLlmStart - tAfterKbSearch}ms firstToken=${firstTokenAt ? firstTokenAt - t0 : -1}ms streamAndSave=${tDone - (firstTokenAt || tAfterLlmStart)}ms hits=${hits.length}`
+        );
 
         controller.close();
       },
