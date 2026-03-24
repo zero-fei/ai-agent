@@ -393,5 +393,50 @@
   padding: 10px;
 }
 
+.mcpEditorShell {
+  border: 1px solid #d9d9d9;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0f1115;
+}
+
+.mcpEditorToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: linear-gradient(180deg, #161a22 0%, #131720 100%);
+  border-bottom: 1px solid #232938;
+}
+
+.mcpEditorToolbar :global(.ant-btn) {
+  border-color: #2e3648 !important;
+  background: #1a2030 !important;
+  color: #dbe5ff !important;
+}
+
+.mcpEditorToolbar :global(.ant-btn:hover) {
+  border-color: #4a5a87 !important;
+  background: #1f2940 !important;
+}
+
+.mcpEditorFooter {
+  padding: 8px 12px;
+  border-top: 1px solid #232938;
+  background: #11151d;
+}
+
+.mcpEditorFooter :global(.ant-typography),
+.mcpEditorToolbar :global(.ant-typography) {
+  color: #a8b3cf !important;
+}
+
+.mcpEditorFooter :global(code) {
+  background: #1f2533;
+  border-color: #2e3648;
+  color: #c9d7ff;
+}
+
 
 

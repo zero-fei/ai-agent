@@ -5,6 +5,7 @@ import { PlusOutlined, DatabaseOutlined, BookOutlined, MessageOutlined, MenuUnfo
 import Image from 'next/image';
 import ChatMessage from './ChatMessage';
 import KnowledgeView from './KnowledgeView';
+import McpView from './McpView';
 import { useRouter } from 'next/navigation';
 import styles from './page.module.css';
 
@@ -396,7 +397,7 @@ const AgentPage = () => {
         }
         return <ChatMessage messages={messages} listRef={listRef} />;
       case 'mcp':
-        return <div className={styles.placeholder}>MCP 管理页面（待实现）</div>;
+        return <McpView />;
       case 'knowledge':
         return <KnowledgeView />;
       default:
@@ -547,7 +548,7 @@ const AgentPage = () => {
           setRenameTitle('');
           setRenameLoading(false);
         }}
-        destroyOnClose
+        destroyOnHidden
       >
         <Input
           value={renameTitle}

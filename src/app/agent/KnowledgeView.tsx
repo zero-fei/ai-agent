@@ -662,7 +662,7 @@ const KnowledgeView: React.FC = () => {
         onCancel={() => setCreateColVisible(false)}
         okText="创建"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <Input
           placeholder="知识库名称"
@@ -687,7 +687,7 @@ const KnowledgeView: React.FC = () => {
         okText="创建并入库"
         cancelText="取消"
         width={900}
-        destroyOnClose
+        destroyOnHidden
         className={styles.kbNewDocModal}
       >
         <div className={styles.kbNewDocBody}>
@@ -762,7 +762,7 @@ const KnowledgeView: React.FC = () => {
         onCancel={() => setUploadDocVisible(false)}
         footer={null}
         width={600}
-        destroyOnClose
+        destroyOnHidden
         className={styles.kbNewDocModal}
       >
         <div className={styles.kbNewDocBody}>

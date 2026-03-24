@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getChatStream } from '@/lib/llm';
+import { getChatStream, getChatText } from '@/lib/llm';
 import db from '@/lib/db';
 import { randomUUID } from 'crypto';
 import { getSession } from '@/lib/auth';
-import { buildRagSystemPrompt, kbSearch } from '@/lib/rag';
+import { buildRagSystemPrompt, isEmbeddingsConfigured, kbSearch } from '@/lib/rag';
+import { callServerTool, listEnabledServers, listEnabledToolDefinitions, resolveDefaultToolName } from '@/lib/mcp';
 
 export const dynamic = 'force-dynamic';
 
@@ -36,6 +37,65 @@ type LlmMessage = {
 
 const isLlmRole = (role: string): role is LlmMessage['role'] => role === 'user' || role === 'assistant';
 
+const MCP_CALL_WITH_TOOL_PATTERN = /@mcp\(\s*([^)]+?)\s*,\s*([^)]+?)\s*\)\s*(\{[\s\S]*\})?/i;
+const MCP_CALL_SERVER_ONLY_PATTERN = /@mcp\(\s*([^)]+?)\s*\)\s*(\{[\s\S]*\})?/i;
+const MCP_CALL_NL_PATTERN = /调用\s*([A-Za-z0-9_-]+)\s*(\{[\s\S]*\})?/i;
+
+const parseMcpArgs = (argsRaw?: string) => {
+  let args: Record<string, unknown> = {};
+  if (argsRaw?.trim()) {
+    const parsed = JSON.parse(argsRaw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('MCP arguments must be a JSON object.');
+    }
+    args = parsed as Record<string, unknown>;
+  }
+  return args;
+};
+
+const parseMcpToolCall = (content: string) => {
+  const text = content.trim().replace(/[，。；]/g, ' ');
+
+  const fullMatch = text.match(MCP_CALL_WITH_TOOL_PATTERN);
+  if (fullMatch) {
+    const [, serverKeyRaw, toolNameRaw, argsRaw] = fullMatch;
+    const serverKey = (serverKeyRaw || '').trim();
+    const toolName = (toolNameRaw || '').trim();
+    if (!serverKey || !toolName) return null;
+    return { serverKey, toolName, args: parseMcpArgs(argsRaw) };
+  }
+
+  const serverOnlyMatch = text.match(MCP_CALL_SERVER_ONLY_PATTERN);
+  if (serverOnlyMatch) {
+    const [, serverKeyRaw, argsRaw] = serverOnlyMatch;
+    const serverKey = (serverKeyRaw || '').trim();
+    if (!serverKey) return null;
+    return { serverKey, toolName: null as string | null, args: parseMcpArgs(argsRaw) };
+  }
+
+  const nlMatch = text.match(MCP_CALL_NL_PATTERN);
+  if (nlMatch) {
+    const [, serverKeyRaw, argsRaw] = nlMatch;
+    const serverKey = (serverKeyRaw || '').trim();
+    if (!serverKey) return null;
+    return { serverKey, toolName: null as string | null, args: parseMcpArgs(argsRaw) };
+  }
+
+  return null;
+};
+
+const extractFirstJsonObject = (text: string) => {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  const candidate = text.slice(start, end + 1);
+  try {
+    return JSON.parse(candidate) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+};
+
 export async function POST(req: NextRequest) {
   const t0 = Date.now();
   try {
@@ -44,6 +104,8 @@ export async function POST(req: NextRequest) {
     let tAfterKbSearch = 0;
     let tAfterLlmStart = 0;
     let firstTokenAt = 0;
+    let mcpPlanAction = 'none';
+    let mcpPlanTool = '';
 
     const token = req.cookies.get('auth-token')?.value;
     if (!token) {
@@ -92,17 +154,173 @@ export async function POST(req: NextRequest) {
     }
 
     const latestUser = llmMessages[llmMessages.length - 1]!;
+    const mcpCall = parseMcpToolCall(latestUser.content);
+
+    if (mcpCall) {
+      mcpPlanAction = 'manual_call';
+      const toolName = mcpCall.toolName || resolveDefaultToolName({ userId: user.id, serverKey: mcpCall.serverKey });
+      mcpPlanTool = `${mcpCall.serverKey}/${toolName}`;
+      const called = await callServerTool({
+        userId: user.id,
+        serverKey: mcpCall.serverKey,
+        toolName,
+        arguments: mcpCall.args,
+      });
+
+      const resultText = JSON.stringify(called.result, null, 2);
+      const toolAwareMessages: LlmMessage[] = [
+        ...llmMessages,
+        { role: 'assistant', content: `[MCP工具 ${mcpCall.serverKey}/${toolName} 原始结果]\n${resultText}` },
+        {
+          role: 'user',
+          content:
+            '请基于上面的 MCP 工具结果给出最终回答。要求：1) 先给结论；2) 关键字段用简洁列表；3) 如果结果为空或异常，明确说明。',
+        },
+      ];
+      const toolAwareSystemPrompt = [
+        '你是一个严谨助手。',
+        '你会先调用 MCP 工具，再基于工具结果回答用户。',
+        '当前工具结果由系统注入，请优先依据该结果，不要编造。',
+      ].join('\n');
+
+      const stream = await getChatStream(toolAwareMessages, { systemPrompt: toolAwareSystemPrompt });
+      tAfterLlmStart = Date.now();
+
+      let aiResponseContent = '';
+      const encoder = new TextEncoder();
+      const readableStream = new ReadableStream({
+        async start(controller) {
+          for await (const chunk of stream) {
+            if (!firstTokenAt) firstTokenAt = Date.now();
+            aiResponseContent += chunk;
+            controller.enqueue(encoder.encode(chunk));
+          }
+
+          const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
+          saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
+          controller.close();
+        },
+      });
+
+      return new Response(readableStream, {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'X-Conversation-Id': conversationId,
+          'X-MCP-Plan-Action': mcpPlanAction,
+          'X-MCP-Plan-Tool': mcpPlanTool,
+        },
+      });
+    }
+
+    // Agent tool-selection phase: model decides whether to call MCP tool.
+    const toolDefs = listEnabledToolDefinitions(user.id);
+    if (toolDefs.length > 0) {
+      const plannerPrompt = [
+        '你是工具规划器。根据用户最后一句话判断是否需要调用工具。',
+        '可用工具列表：',
+        ...toolDefs.map((t) => `- ${t.serverKey}/${t.toolName}: ${t.description}`),
+        '只允许输出 JSON，不要输出其他内容。',
+        '格式一（需要调用工具）: {"action":"call_tool","serverKey":"...","toolName":"...","arguments":{}}',
+        '格式二（无需调用）: {"action":"no_tool"}',
+      ].join('\n');
+
+      const plannerOutput = await getChatText(llmMessages, { systemPrompt: plannerPrompt });
+      const plan = extractFirstJsonObject(plannerOutput);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[mcp-planner]', {
+          userId: user.id,
+          plannerOutput,
+          parsedPlan: plan,
+        });
+      }
+      if (plan?.action === 'call_tool') {
+        mcpPlanAction = 'call_tool';
+        const serverKey = typeof plan.serverKey === 'string' ? plan.serverKey : '';
+        const toolName = typeof plan.toolName === 'string' ? plan.toolName : '';
+        const args =
+          plan.arguments && typeof plan.arguments === 'object' && !Array.isArray(plan.arguments)
+            ? (plan.arguments as Record<string, unknown>)
+            : {};
+
+        if (serverKey && toolName) {
+          mcpPlanTool = `${serverKey}/${toolName}`;
+          const called = await callServerTool({
+            userId: user.id,
+            serverKey,
+            toolName,
+            arguments: args,
+          });
+          const resultText = JSON.stringify(called.result, null, 2);
+          const toolAwareMessages: LlmMessage[] = [
+            ...llmMessages,
+            { role: 'assistant', content: `[MCP工具 ${serverKey}/${toolName} 原始结果]\n${resultText}` },
+            {
+              role: 'user',
+              content:
+                '请基于上面的 MCP 工具结果给出最终回答。要求：1) 先给结论；2) 关键字段用简洁列表；3) 如果结果为空或异常，明确说明。',
+            },
+          ];
+          const stream = await getChatStream(toolAwareMessages, {
+            systemPrompt: '你是一个严谨助手。你会先调用工具，再基于工具结果回答；不要编造。',
+          });
+          tAfterLlmStart = Date.now();
+
+          let aiResponseContent = '';
+          const encoder = new TextEncoder();
+          const readableStream = new ReadableStream({
+            async start(controller) {
+              for await (const chunk of stream) {
+                if (!firstTokenAt) firstTokenAt = Date.now();
+                aiResponseContent += chunk;
+                controller.enqueue(encoder.encode(chunk));
+              }
+
+              const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
+              saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
+              controller.close();
+            },
+          });
+
+          return new Response(readableStream, {
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'X-Conversation-Id': conversationId,
+              'X-MCP-Plan-Action': mcpPlanAction,
+              'X-MCP-Plan-Tool': mcpPlanTool,
+            },
+          });
+        }
+      }
+      if (!mcpPlanAction || mcpPlanAction === 'none') {
+        mcpPlanAction = 'no_tool';
+      }
+    }
+
     // RAG 检索：
     // - 支持客户端透传 collectionId，用于“每个会话选择知识库/集合”
-    const hits = await kbSearch({ userId: user.id, collectionId, query: latestUser.content, topK: 5 });
+    // - 未配置 Embeddings key 时直接跳过检索，避免影响主对话链路
+    const hits = isEmbeddingsConfigured()
+      ? await kbSearch({ userId: user.id, collectionId, query: latestUser.content, topK: 5 })
+      : [];
     tAfterKbSearch = Date.now();
     const ragSystemPrompt = buildRagSystemPrompt({
       query: latestUser.content,
       hits: hits.map((h) => ({ content: h.content, score: h.score })),
     });
+    const enabledMcpServers = listEnabledServers(user.id);
+    const mcpInstruction = enabledMcpServers.length
+      ? [
+          '可用 MCP Servers（已启用）：',
+          ...enabledMcpServers.map((s) => `- ${s.serverKey}${s.endpoint ? ` (${s.endpoint})` : ''}`),
+          '如果需要调用 MCP 工具，请使用严格格式：@mcp(serverKey,toolName) {"arg":"value"}',
+          '简化调用也支持：@mcp(serverKey) {} 或 调用serverKey {}（仅当该 server 只有一个工具时）',
+          '如果不是显式 MCP 调用，就按正常对话回答。',
+        ].join('\n')
+      : null;
+    const mergedSystemPrompt = [ragSystemPrompt, mcpInstruction].filter(Boolean).join('\n\n') || undefined;
 
     // 通过覆盖 system prompt 注入检索上下文（不改变前端消息结构）。
-    const stream = await getChatStream(llmMessages, { systemPrompt: ragSystemPrompt ?? undefined });
+    const stream = await getChatStream(llmMessages, { systemPrompt: mergedSystemPrompt });
     tAfterLlmStart = Date.now();
 
     let aiResponseContent = '';
@@ -132,6 +350,8 @@ export async function POST(req: NextRequest) {
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
         'X-Conversation-Id': conversationId,
+        'X-MCP-Plan-Action': mcpPlanAction,
+        'X-MCP-Plan-Tool': mcpPlanTool,
       },
     });
 

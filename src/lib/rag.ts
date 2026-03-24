@@ -71,6 +71,11 @@ const getEmbeddingsClient = () => {
   });
 };
 
+export const isEmbeddingsConfigured = () => {
+  const apiKey = process.env.DASHSCOPE_API_KEY_EMBEDDINGS;
+  return Boolean(apiKey && apiKey !== 'your-api-key');
+};
+
 function getCollectionConfigForUser(collectionId: string | null, userId: string): KbCollectionConfig {
   if (!collectionId) return DEFAULT_KB_CONFIG;
   try {

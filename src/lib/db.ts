@@ -130,6 +130,42 @@ function initializeDatabase() {
     )
   `);
 
+  // MCP management: server configs
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mcp_servers (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      name TEXT NOT NULL,
+      serverKey TEXT NOT NULL,
+      endpoint TEXT,
+      config TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      authStatus TEXT NOT NULL DEFAULT 'unknown',
+      lastHealthStatus TEXT,
+      lastHealthMessage TEXT,
+      lastHealthAt DATETIME,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES users (id) ON DELETE CASCADE
+    )
+  `);
+
+  // MCP management: operation logs
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mcp_logs (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      serverId TEXT NOT NULL,
+      action TEXT NOT NULL,
+      status TEXT NOT NULL,
+      message TEXT,
+      meta TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES users (id) ON DELETE CASCADE,
+      FOREIGN KEY (serverId) REFERENCES mcp_servers (id) ON DELETE CASCADE
+    )
+  `);
+
   // Migrations for existing DBs (CREATE TABLE IF NOT EXISTS does not add columns).
   if (!columnExists('kb_documents', 'collectionId')) {
     // 老库在引入“多集合”之前没有该列，需要补上。
@@ -141,6 +177,30 @@ function initializeDatabase() {
   }
   if (!columnExists('kb_collections', 'config')) {
     db.exec(`ALTER TABLE kb_collections ADD COLUMN config TEXT;`);
+  }
+  if (!columnExists('mcp_servers', 'endpoint')) {
+    db.exec(`ALTER TABLE mcp_servers ADD COLUMN endpoint TEXT;`);
+  }
+  if (!columnExists('mcp_servers', 'config')) {
+    db.exec(`ALTER TABLE mcp_servers ADD COLUMN config TEXT;`);
+  }
+  if (!columnExists('mcp_servers', 'enabled')) {
+    db.exec(`ALTER TABLE mcp_servers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;`);
+  }
+  if (!columnExists('mcp_servers', 'authStatus')) {
+    db.exec(`ALTER TABLE mcp_servers ADD COLUMN authStatus TEXT NOT NULL DEFAULT 'unknown';`);
+  }
+  if (!columnExists('mcp_servers', 'lastHealthStatus')) {
+    db.exec(`ALTER TABLE mcp_servers ADD COLUMN lastHealthStatus TEXT;`);
+  }
+  if (!columnExists('mcp_servers', 'lastHealthMessage')) {
+    db.exec(`ALTER TABLE mcp_servers ADD COLUMN lastHealthMessage TEXT;`);
+  }
+  if (!columnExists('mcp_servers', 'lastHealthAt')) {
+    db.exec(`ALTER TABLE mcp_servers ADD COLUMN lastHealthAt DATETIME;`);
+  }
+  if (!columnExists('mcp_servers', 'updatedAt')) {
+    db.exec(`ALTER TABLE mcp_servers ADD COLUMN updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP;`);
   }
 
   // 用于大规模检索的候选召回（可选）。
@@ -165,6 +225,10 @@ function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_kb_chunks_documentId ON kb_chunks(documentId);
     CREATE INDEX IF NOT EXISTS idx_kb_documents_user_collection ON kb_documents(userId, collectionId);
     CREATE INDEX IF NOT EXISTS idx_kb_collections_userId ON kb_collections(userId);
+    CREATE INDEX IF NOT EXISTS idx_mcp_servers_userId ON mcp_servers(userId);
+    CREATE INDEX IF NOT EXISTS idx_mcp_servers_user_enabled ON mcp_servers(userId, enabled);
+    CREATE INDEX IF NOT EXISTS idx_mcp_logs_userId ON mcp_logs(userId);
+    CREATE INDEX IF NOT EXISTS idx_mcp_logs_server_createdAt ON mcp_logs(serverId, createdAt DESC);
   `);
 
   console.log("Database initialized successfully.");
