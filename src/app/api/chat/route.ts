@@ -96,6 +96,42 @@ const extractFirstJsonObject = (text: string) => {
   }
 };
 
+const containsToolTriggerWord = (text: string) => {
+  const triggers = ['调用', '执行', '使用工具', '@mcp', 'tool', 'invoke', 'call'];
+  const lower = text.toLowerCase();
+  return triggers.some((t) => lower.includes(t.toLowerCase()));
+};
+
+const shouldAllowAutoToolCall = (userText: string, tools: Array<{ serverKey: string; toolName: string }>) => {
+  const lower = userText.toLowerCase();
+  const hasToolNameMatch = tools.some(
+    (t) => lower.includes(t.serverKey.toLowerCase()) || lower.includes(t.toolName.toLowerCase())
+  );
+  if (!hasToolNameMatch) return false;
+
+  // Fast path: user sends only serverKey/toolName-like short text, allow direct call.
+  const compact = lower.replace(/\s+/g, '');
+  const isDirectNameOnly = tools.some(
+    (t) => compact === t.serverKey.toLowerCase() || compact === t.toolName.toLowerCase()
+  );
+  if (isDirectNameOnly) return true;
+
+  // General path: still require explicit trigger words.
+  return containsToolTriggerWord(userText);
+};
+
+const resolveDirectNameTrigger = (
+  userText: string,
+  tools: Array<{ serverKey: string; toolName: string }>
+) => {
+  const compact = userText.toLowerCase().replace(/\s+/g, '');
+  const byServer = tools.find((t) => compact === t.serverKey.toLowerCase());
+  if (byServer) return { serverKey: byServer.serverKey, toolName: byServer.toolName };
+  const byTool = tools.find((t) => compact === t.toolName.toLowerCase());
+  if (byTool) return { serverKey: byTool.serverKey, toolName: byTool.toolName };
+  return null;
+};
+
 export async function POST(req: NextRequest) {
   const t0 = Date.now();
   try {
@@ -215,10 +251,64 @@ export async function POST(req: NextRequest) {
     // Agent tool-selection phase: model decides whether to call MCP tool.
     const toolDefs = listEnabledToolDefinitions(user.id);
     if (toolDefs.length > 0) {
+      const directTrigger = resolveDirectNameTrigger(latestUser.content, toolDefs);
+      if (directTrigger) {
+        mcpPlanAction = 'direct_name_call';
+        mcpPlanTool = `${directTrigger.serverKey}/${directTrigger.toolName}`;
+        const called = await callServerTool({
+          userId: user.id,
+          serverKey: directTrigger.serverKey,
+          toolName: directTrigger.toolName,
+          arguments: {},
+        });
+        const resultText = JSON.stringify(called.result, null, 2);
+        const toolAwareMessages: LlmMessage[] = [
+          ...llmMessages,
+          { role: 'assistant', content: `[MCP工具 ${directTrigger.serverKey}/${directTrigger.toolName} 原始结果]\n${resultText}` },
+          {
+            role: 'user',
+            content:
+              '请基于上面的 MCP 工具结果给出最终回答。要求：1) 先给结论；2) 关键字段用简洁列表；3) 如果结果为空或异常，明确说明。',
+          },
+        ];
+        const stream = await getChatStream(toolAwareMessages, {
+          systemPrompt: '你是一个严谨助手。你会先调用工具，再基于工具结果回答；不要编造。',
+        });
+        tAfterLlmStart = Date.now();
+
+        let aiResponseContent = '';
+        const encoder = new TextEncoder();
+        const readableStream = new ReadableStream({
+          async start(controller) {
+            for await (const chunk of stream) {
+              if (!firstTokenAt) firstTokenAt = Date.now();
+              aiResponseContent += chunk;
+              controller.enqueue(encoder.encode(chunk));
+            }
+
+            const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
+            saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
+            controller.close();
+          },
+        });
+
+        return new Response(readableStream, {
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'X-Conversation-Id': conversationId,
+            'X-MCP-Plan-Action': mcpPlanAction,
+            'X-MCP-Plan-Tool': mcpPlanTool,
+          },
+        });
+      }
+
+      const autoToolAllowed = shouldAllowAutoToolCall(latestUser.content, toolDefs);
       const plannerPrompt = [
         '你是工具规划器。根据用户最后一句话判断是否需要调用工具。',
         '可用工具列表：',
         ...toolDefs.map((t) => `- ${t.serverKey}/${t.toolName}: ${t.description}`),
+        '严格规则：如果用户没有明确表达“调用/执行/使用工具”意图，必须返回 {"action":"no_tool"}。',
+        '严格规则：如果用户问题是闲聊、夸赞、润色、泛问答，必须返回 {"action":"no_tool"}。',
         '只允许输出 JSON，不要输出其他内容。',
         '格式一（需要调用工具）: {"action":"call_tool","serverKey":"...","toolName":"...","arguments":{}}',
         '格式二（无需调用）: {"action":"no_tool"}',
@@ -229,11 +319,12 @@ export async function POST(req: NextRequest) {
       if (process.env.NODE_ENV !== 'production') {
         console.log('[mcp-planner]', {
           userId: user.id,
+          autoToolAllowed,
           plannerOutput,
           parsedPlan: plan,
         });
       }
-      if (plan?.action === 'call_tool') {
+      if (plan?.action === 'call_tool' && autoToolAllowed) {
         mcpPlanAction = 'call_tool';
         const serverKey = typeof plan.serverKey === 'string' ? plan.serverKey : '';
         const toolName = typeof plan.toolName === 'string' ? plan.toolName : '';
@@ -288,6 +379,14 @@ export async function POST(req: NextRequest) {
               'X-MCP-Plan-Action': mcpPlanAction,
               'X-MCP-Plan-Tool': mcpPlanTool,
             },
+          });
+        }
+      }
+      if (plan?.action === 'call_tool' && !autoToolAllowed) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[mcp-planner] blocked by guardrail', {
+            userId: user.id,
+            latestUser: latestUser.content,
           });
         }
       }
