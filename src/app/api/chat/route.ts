@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getChatStream, getChatText } from '@/lib/llm';
+import { getChatStream } from '@/lib/llm';
 import db from '@/lib/db';
 import { randomUUID } from 'crypto';
 import { getSession } from '@/lib/auth';
 import { buildRagSystemPrompt, isEmbeddingsConfigured, kbSearch } from '@/lib/rag';
 import { callServerTool, listEnabledServers, listEnabledToolDefinitions, resolveDefaultToolName } from '@/lib/mcp';
+import { ChatOpenAI } from '@langchain/openai';
+import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 
 export const dynamic = 'force-dynamic';
 
@@ -84,18 +86,6 @@ const parseMcpToolCall = (content: string) => {
   return null;
 };
 
-const extractFirstJsonObject = (text: string) => {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  const candidate = text.slice(start, end + 1);
-  try {
-    return JSON.parse(candidate) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-};
-
 const containsToolTriggerWord = (text: string) => {
   const triggers = ['调用', '执行', '使用工具', '@mcp', 'tool', 'invoke', 'call'];
   const lower = text.toLowerCase();
@@ -132,6 +122,99 @@ const resolveDirectNameTrigger = (
   return null;
 };
 
+type FunctionToolBinding = {
+  functionName: string;
+  serverKey: string;
+  toolName: string;
+  description: string;
+};
+
+const toFunctionSafeName = (serverKey: string, toolName: string) => {
+  const safeServer = serverKey.replace(/[^a-zA-Z0-9_]/g, '_');
+  const safeTool = toolName.replace(/[^a-zA-Z0-9_]/g, '_');
+  return `mcp_${safeServer}__${safeTool}`.slice(0, 64);
+};
+
+const buildFunctionToolBindings = (tools: Array<{ serverKey: string; toolName: string; description: string }>) => {
+  const usedNames = new Set<string>();
+  const bindings: FunctionToolBinding[] = [];
+  for (const t of tools) {
+    const baseName = toFunctionSafeName(t.serverKey, t.toolName);
+    let fnName = baseName;
+    let i = 1;
+    while (usedNames.has(fnName)) {
+      fnName = `${baseName}_${i++}`.slice(0, 64);
+    }
+    usedNames.add(fnName);
+    bindings.push({
+      functionName: fnName,
+      serverKey: t.serverKey,
+      toolName: t.toolName,
+      description: t.description,
+    });
+  }
+  return bindings;
+};
+
+const getFunctionCallingDecision = async (params: {
+  latestUserText: string;
+  toolDefs: Array<{ serverKey: string; toolName: string; description: string }>;
+}) => {
+  const { latestUserText, toolDefs } = params;
+  if (!toolDefs.length) return null;
+
+  const bindings = buildFunctionToolBindings(toolDefs);
+  const tools = bindings.map((b) => ({
+    type: 'function' as const,
+    function: {
+      name: b.functionName,
+      description: b.description,
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+      },
+    },
+  }));
+
+  const plannerModel = new ChatOpenAI({
+    apiKey: process.env.DASHSCOPE_API_KEY,
+    modelName: 'qwen3.5-plus',
+    configuration: {
+      baseURL: process.env.DASHSCOPE_BASE_URL || 'https://coding.dashscope.aliyuncs.com/v1',
+    },
+    modelKwargs: {
+      enable_thinking: false,
+    },
+    temperature: 0,
+  }).bindTools(tools);
+
+  const plannerResponse = await plannerModel.invoke([
+    new SystemMessage(
+      [
+        '你是工具选择器。',
+        '当且仅当用户明确要求调用/执行工具，或明确给出了工具相关指令时，才调用 function。',
+        '如果是普通问答、闲聊、润色、夸赞，不要调用任何 function。',
+        '如果要调用，arguments 必须是 JSON object。',
+      ].join('\n')
+    ),
+    new HumanMessage(latestUserText),
+  ]);
+
+  const toolCalls = plannerResponse instanceof AIMessage ? plannerResponse.tool_calls ?? [] : [];
+  if (!toolCalls.length) return null;
+
+  const first = toolCalls[0];
+  const binding = bindings.find((b) => b.functionName === first.name);
+  if (!binding) return null;
+
+  const args =
+    first.args && typeof first.args === 'object' && !Array.isArray(first.args)
+      ? (first.args as Record<string, unknown>)
+      : {};
+
+  return { binding, args };
+};
+
 export async function POST(req: NextRequest) {
   const t0 = Date.now();
   try {
@@ -142,6 +225,8 @@ export async function POST(req: NextRequest) {
     let firstTokenAt = 0;
     let mcpPlanAction = 'none';
     let mcpPlanTool = '';
+    let mcpPlanMode = 'none';
+    let mcpFunctionName = '';
 
     const token = req.cookies.get('auth-token')?.value;
     if (!token) {
@@ -194,6 +279,7 @@ export async function POST(req: NextRequest) {
 
     if (mcpCall) {
       mcpPlanAction = 'manual_call';
+      mcpPlanMode = 'manual';
       const toolName = mcpCall.toolName || resolveDefaultToolName({ userId: user.id, serverKey: mcpCall.serverKey });
       mcpPlanTool = `${mcpCall.serverKey}/${toolName}`;
       const called = await callServerTool({
@@ -244,6 +330,8 @@ export async function POST(req: NextRequest) {
           'X-Conversation-Id': conversationId,
           'X-MCP-Plan-Action': mcpPlanAction,
           'X-MCP-Plan-Tool': mcpPlanTool,
+          'X-MCP-Plan-Mode': mcpPlanMode,
+          'X-MCP-Function-Name': mcpFunctionName,
         },
       });
     }
@@ -254,6 +342,7 @@ export async function POST(req: NextRequest) {
       const directTrigger = resolveDirectNameTrigger(latestUser.content, toolDefs);
       if (directTrigger) {
         mcpPlanAction = 'direct_name_call';
+        mcpPlanMode = 'direct_name';
         mcpPlanTool = `${directTrigger.serverKey}/${directTrigger.toolName}`;
         const called = await callServerTool({
           userId: user.id,
@@ -298,93 +387,90 @@ export async function POST(req: NextRequest) {
             'X-Conversation-Id': conversationId,
             'X-MCP-Plan-Action': mcpPlanAction,
             'X-MCP-Plan-Tool': mcpPlanTool,
+            'X-MCP-Plan-Mode': mcpPlanMode,
+            'X-MCP-Function-Name': mcpFunctionName,
           },
         });
       }
 
       const autoToolAllowed = shouldAllowAutoToolCall(latestUser.content, toolDefs);
-      const plannerPrompt = [
-        '你是工具规划器。根据用户最后一句话判断是否需要调用工具。',
-        '可用工具列表：',
-        ...toolDefs.map((t) => `- ${t.serverKey}/${t.toolName}: ${t.description}`),
-        '严格规则：如果用户没有明确表达“调用/执行/使用工具”意图，必须返回 {"action":"no_tool"}。',
-        '严格规则：如果用户问题是闲聊、夸赞、润色、泛问答，必须返回 {"action":"no_tool"}。',
-        '只允许输出 JSON，不要输出其他内容。',
-        '格式一（需要调用工具）: {"action":"call_tool","serverKey":"...","toolName":"...","arguments":{}}',
-        '格式二（无需调用）: {"action":"no_tool"}',
-      ].join('\n');
-
-      const plannerOutput = await getChatText(llmMessages, { systemPrompt: plannerPrompt });
-      const plan = extractFirstJsonObject(plannerOutput);
+      const decision = await getFunctionCallingDecision({
+        latestUserText: latestUser.content,
+        toolDefs,
+      });
       if (process.env.NODE_ENV !== 'production') {
-        console.log('[mcp-planner]', {
+        console.log('[mcp-fc-planner]', {
           userId: user.id,
           autoToolAllowed,
-          plannerOutput,
-          parsedPlan: plan,
+          decision: decision
+            ? {
+                serverKey: decision.binding.serverKey,
+                toolName: decision.binding.toolName,
+                args: decision.args,
+              }
+            : null,
         });
       }
-      if (plan?.action === 'call_tool' && autoToolAllowed) {
+      if (decision && autoToolAllowed) {
         mcpPlanAction = 'call_tool';
-        const serverKey = typeof plan.serverKey === 'string' ? plan.serverKey : '';
-        const toolName = typeof plan.toolName === 'string' ? plan.toolName : '';
-        const args =
-          plan.arguments && typeof plan.arguments === 'object' && !Array.isArray(plan.arguments)
-            ? (plan.arguments as Record<string, unknown>)
-            : {};
+        mcpPlanMode = 'function_calling';
+        const serverKey = decision.binding.serverKey;
+        const toolName = decision.binding.toolName;
+        const args = decision.args;
+        mcpFunctionName = decision.binding.functionName;
 
-        if (serverKey && toolName) {
-          mcpPlanTool = `${serverKey}/${toolName}`;
-          const called = await callServerTool({
-            userId: user.id,
-            serverKey,
-            toolName,
-            arguments: args,
-          });
-          const resultText = JSON.stringify(called.result, null, 2);
-          const toolAwareMessages: LlmMessage[] = [
-            ...llmMessages,
-            { role: 'assistant', content: `[MCP工具 ${serverKey}/${toolName} 原始结果]\n${resultText}` },
-            {
-              role: 'user',
-              content:
-                '请基于上面的 MCP 工具结果给出最终回答。要求：1) 先给结论；2) 关键字段用简洁列表；3) 如果结果为空或异常，明确说明。',
-            },
-          ];
-          const stream = await getChatStream(toolAwareMessages, {
-            systemPrompt: '你是一个严谨助手。你会先调用工具，再基于工具结果回答；不要编造。',
-          });
-          tAfterLlmStart = Date.now();
+        mcpPlanTool = `${serverKey}/${toolName}`;
+        const called = await callServerTool({
+          userId: user.id,
+          serverKey,
+          toolName,
+          arguments: args,
+        });
+        const resultText = JSON.stringify(called.result, null, 2);
+        const toolAwareMessages: LlmMessage[] = [
+          ...llmMessages,
+          { role: 'assistant', content: `[MCP工具 ${serverKey}/${toolName} 原始结果]\n${resultText}` },
+          {
+            role: 'user',
+            content:
+              '请基于上面的 MCP 工具结果给出最终回答。要求：1) 先给结论；2) 关键字段用简洁列表；3) 如果结果为空或异常，明确说明。',
+          },
+        ];
+        const stream = await getChatStream(toolAwareMessages, {
+          systemPrompt: '你是一个严谨助手。你会先调用工具，再基于工具结果回答；不要编造。',
+        });
+        tAfterLlmStart = Date.now();
 
-          let aiResponseContent = '';
-          const encoder = new TextEncoder();
-          const readableStream = new ReadableStream({
-            async start(controller) {
-              for await (const chunk of stream) {
-                if (!firstTokenAt) firstTokenAt = Date.now();
-                aiResponseContent += chunk;
-                controller.enqueue(encoder.encode(chunk));
-              }
+        let aiResponseContent = '';
+        const encoder = new TextEncoder();
+        const readableStream = new ReadableStream({
+          async start(controller) {
+            for await (const chunk of stream) {
+              if (!firstTokenAt) firstTokenAt = Date.now();
+              aiResponseContent += chunk;
+              controller.enqueue(encoder.encode(chunk));
+            }
 
-              const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
-              saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
-              controller.close();
-            },
-          });
+            const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
+            saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
+            controller.close();
+          },
+        });
 
-          return new Response(readableStream, {
-            headers: {
-              'Content-Type': 'text/plain; charset=utf-8',
-              'X-Conversation-Id': conversationId,
-              'X-MCP-Plan-Action': mcpPlanAction,
-              'X-MCP-Plan-Tool': mcpPlanTool,
-            },
-          });
-        }
+        return new Response(readableStream, {
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'X-Conversation-Id': conversationId,
+            'X-MCP-Plan-Action': mcpPlanAction,
+            'X-MCP-Plan-Tool': mcpPlanTool,
+            'X-MCP-Plan-Mode': mcpPlanMode,
+            'X-MCP-Function-Name': mcpFunctionName,
+          },
+        });
       }
-      if (plan?.action === 'call_tool' && !autoToolAllowed) {
+      if (decision && !autoToolAllowed) {
         if (process.env.NODE_ENV !== 'production') {
-          console.log('[mcp-planner] blocked by guardrail', {
+          console.log('[mcp-fc-planner] blocked by guardrail', {
             userId: user.id,
             latestUser: latestUser.content,
           });
@@ -451,6 +537,8 @@ export async function POST(req: NextRequest) {
         'X-Conversation-Id': conversationId,
         'X-MCP-Plan-Action': mcpPlanAction,
         'X-MCP-Plan-Tool': mcpPlanTool,
+        'X-MCP-Plan-Mode': mcpPlanMode,
+        'X-MCP-Function-Name': mcpFunctionName,
       },
     });
 
