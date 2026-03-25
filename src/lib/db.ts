@@ -166,6 +166,21 @@ function initializeDatabase() {
     )
   `);
 
+  // Agent memory: user-level long-term memories
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_memories (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      memoryType TEXT NOT NULL,
+      content TEXT NOT NULL,
+      embedding TEXT,
+      source TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES users (id) ON DELETE CASCADE
+    )
+  `);
+
   // Migrations for existing DBs (CREATE TABLE IF NOT EXISTS does not add columns).
   if (!columnExists('kb_documents', 'collectionId')) {
     // 老库在引入“多集合”之前没有该列，需要补上。
@@ -229,6 +244,8 @@ function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_mcp_servers_user_enabled ON mcp_servers(userId, enabled);
     CREATE INDEX IF NOT EXISTS idx_mcp_logs_userId ON mcp_logs(userId);
     CREATE INDEX IF NOT EXISTS idx_mcp_logs_server_createdAt ON mcp_logs(serverId, createdAt DESC);
+    CREATE INDEX IF NOT EXISTS idx_user_memories_userId ON user_memories(userId);
+    CREATE INDEX IF NOT EXISTS idx_user_memories_user_createdAt ON user_memories(userId, createdAt DESC);
   `);
 
   console.log("Database initialized successfully.");

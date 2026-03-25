@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import { getSession } from '@/lib/auth';
 import { buildRagSystemPrompt, isEmbeddingsConfigured, kbSearch } from '@/lib/rag';
 import { callServerTool, listEnabledServers, listEnabledToolDefinitions, resolveDefaultToolName } from '@/lib/mcp';
+import { buildMemorySystemPrompt, extractMemoriesFromTurn, searchMemories, upsertMemories } from '@/lib/memory';
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 
@@ -275,6 +276,31 @@ export async function POST(req: NextRequest) {
     }
 
     const latestUser = llmMessages[llmMessages.length - 1]!;
+
+    // Memory recall: retrieve memories for current query and inject into system prompt.
+    let memorySystemPrompt: string | null = null;
+    try {
+      const memories = await searchMemories({ userId: user.id, query: latestUser.content });
+      memorySystemPrompt = buildMemorySystemPrompt({ query: latestUser.content, memories });
+    } catch (err) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[memory-recall]', err);
+      }
+    }
+
+    // Memory update: extract and persist after assistant finishes generating.
+    const updateMemoriesForTurn = async (assistantText: string) => {
+      try {
+        if (!assistantText?.trim()) return;
+        const items = await extractMemoriesFromTurn({ userText: latestUser.content, assistantText });
+        if (!items.length) return;
+        await upsertMemories({ userId: user.id, items });
+      } catch (err) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[memory-update]', err);
+        }
+      }
+    };
     const mcpCall = parseMcpToolCall(latestUser.content);
 
     if (mcpCall) {
@@ -303,7 +329,8 @@ export async function POST(req: NextRequest) {
         '你是一个严谨助手。',
         '你会先调用 MCP 工具，再基于工具结果回答用户。',
         '当前工具结果由系统注入，请优先依据该结果，不要编造。',
-      ].join('\n');
+        memorySystemPrompt,
+      ].filter(Boolean).join('\n');
 
       const stream = await getChatStream(toolAwareMessages, { systemPrompt: toolAwareSystemPrompt });
       tAfterLlmStart = Date.now();
@@ -320,6 +347,7 @@ export async function POST(req: NextRequest) {
 
           const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
           saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
+          void updateMemoriesForTurn(aiResponseContent);
           controller.close();
         },
       });
@@ -360,8 +388,9 @@ export async function POST(req: NextRequest) {
               '请基于上面的 MCP 工具结果给出最终回答。要求：1) 先给结论；2) 关键字段用简洁列表；3) 如果结果为空或异常，明确说明。',
           },
         ];
+        const baseSystemPrompt = '你是一个严谨助手。你会先调用工具，再基于工具结果回答；不要编造。';
         const stream = await getChatStream(toolAwareMessages, {
-          systemPrompt: '你是一个严谨助手。你会先调用工具，再基于工具结果回答；不要编造。',
+          systemPrompt: [baseSystemPrompt, memorySystemPrompt].filter(Boolean).join('\n\n'),
         });
         tAfterLlmStart = Date.now();
 
@@ -377,6 +406,7 @@ export async function POST(req: NextRequest) {
 
             const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
             saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
+            void updateMemoriesForTurn(aiResponseContent);
             controller.close();
           },
         });
@@ -436,8 +466,9 @@ export async function POST(req: NextRequest) {
               '请基于上面的 MCP 工具结果给出最终回答。要求：1) 先给结论；2) 关键字段用简洁列表；3) 如果结果为空或异常，明确说明。',
           },
         ];
+        const baseSystemPrompt = '你是一个严谨助手。你会先调用工具，再基于工具结果回答；不要编造。';
         const stream = await getChatStream(toolAwareMessages, {
-          systemPrompt: '你是一个严谨助手。你会先调用工具，再基于工具结果回答；不要编造。',
+          systemPrompt: [baseSystemPrompt, memorySystemPrompt].filter(Boolean).join('\n\n'),
         });
         tAfterLlmStart = Date.now();
 
@@ -453,6 +484,7 @@ export async function POST(req: NextRequest) {
 
             const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
             saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
+            void updateMemoriesForTurn(aiResponseContent);
             controller.close();
           },
         });
@@ -502,7 +534,7 @@ export async function POST(req: NextRequest) {
           '如果不是显式 MCP 调用，就按正常对话回答。',
         ].join('\n')
       : null;
-    const mergedSystemPrompt = [ragSystemPrompt, mcpInstruction].filter(Boolean).join('\n\n') || undefined;
+    const mergedSystemPrompt = [ragSystemPrompt, mcpInstruction, memorySystemPrompt].filter(Boolean).join('\n\n') || undefined;
 
     // 通过覆盖 system prompt 注入检索上下文（不改变前端消息结构）。
     const stream = await getChatStream(llmMessages, { systemPrompt: mergedSystemPrompt });
@@ -521,6 +553,8 @@ export async function POST(req: NextRequest) {
         // 流式输出完成后再保存 AI 回复（单条记录保存完整内容）。
         const saveAiMsgStmt = db.prepare('INSERT INTO messages (id, conversationId, role, content) VALUES (?, ?, ?, ?)');
         saveAiMsgStmt.run(randomUUID(), conversationId, 'assistant', aiResponseContent);
+
+        void updateMemoriesForTurn(aiResponseContent);
 
         const tDone = Date.now();
         console.log(
