@@ -1,11 +1,12 @@
 "use client";
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Layout, Input, Typography, Alert, Menu, Button, Divider, Spin, Avatar, Select, Modal } from 'antd';
-import { PlusOutlined, DatabaseOutlined, BookOutlined, MessageOutlined, MenuUnfoldOutlined, MenuFoldOutlined, LogoutOutlined, UserOutlined, ArrowUpOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
+import { Layout, Input, Typography, Alert, Menu, Button, Divider, Spin, Avatar, Select, Modal, AutoComplete, Tag } from 'antd';
+import { PlusOutlined, DatabaseOutlined, BookOutlined, MessageOutlined, MenuUnfoldOutlined, MenuFoldOutlined, LogoutOutlined, UserOutlined, ArrowUpOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import Image from 'next/image';
 import ChatMessage from './ChatMessage';
 import KnowledgeView from './KnowledgeView';
 import McpView from './McpView';
+import SkillsView from './SkillsView';
 import { useRouter } from 'next/navigation';
 import styles from './page.module.css';
 
@@ -32,7 +33,7 @@ interface User {
   email: string;
 }
 
-type ActiveView = 'chat' | 'mcp' | 'knowledge';
+type ActiveView = 'chat' | 'mcp' | 'knowledge' | 'skills';
 
 const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -43,6 +44,12 @@ type MessageRow = {
   role: 'user' | 'assistant' | string;
   content: string;
   createdAt: string;
+};
+
+type SkillListItem = {
+  name: string;
+  description: string;
+  valid: boolean;
 };
 
 // 根据本地时间生成问候语
@@ -71,6 +78,8 @@ const AgentPage = () => {
   const [greeting, setGreeting] = useState('你好');
   const [collectionsForChat, setCollectionsForChat] = useState<{ id: string; name: string }[]>([]);
   const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null);
+  const [skillsForChat, setSkillsForChat] = useState<SkillListItem[]>([]);
+  const [selectedSkillName, setSelectedSkillName] = useState<string | null>(null);
   const [renameModalOpen, setRenameModalOpen] = useState(false);
   const [renameConversationId, setRenameConversationId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
@@ -133,6 +142,20 @@ const AgentPage = () => {
       }
     };
     fetchCollectionsForChat();
+  }, []);
+
+  useEffect(() => {
+    const fetchSkillsForChat = async () => {
+      try {
+        const res = await fetch('/api/skills');
+        if (!res.ok) return;
+        const data = (await res.json()) as SkillListItem[];
+        setSkillsForChat(data.filter((s) => s.valid));
+      } catch {
+        // ignore
+      }
+    };
+    fetchSkillsForChat();
   }, []);
 
   useEffect(() => {
@@ -270,6 +293,7 @@ const AgentPage = () => {
           messages: newMessages.map(m => ({ role: m.sender, content: m.text })),
           conversationId: currentConversationId,
           collectionId: selectedCollectionId,
+          skillName: selectedSkillName,
         }),
       });
 
@@ -331,6 +355,27 @@ const AgentPage = () => {
     }
   };
 
+  const slashQuery = inputValue.startsWith('/') ? inputValue.slice(1).trim().toLowerCase() : '';
+  const slashSkillOptions = inputValue.startsWith('/')
+    ? skillsForChat
+        .filter((s) => !slashQuery || s.name.toLowerCase().includes(slashQuery))
+        .slice(0, 8)
+        .map((s) => ({
+          value: s.name,
+          label: (
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+              <span>/{s.name}</span>
+              <span style={{ color: '#999' }}>{s.description}</span>
+            </div>
+          ),
+        }))
+    : [];
+
+  const handleSlashSkillSelect = (skillName: string) => {
+    setSelectedSkillName(skillName);
+    setInputValue('');
+  };
+
   const renderContent = () => {
     if (pageLoading) {
       return (
@@ -362,15 +407,22 @@ const AgentPage = () => {
 
                 <div className={styles.welcomeInputRow}>
                   <div className={styles.inputWithSend}>
-                    <Input
-                      placeholder="请输入你的问题…"
-                      size="large"
-                      value={inputValue}
-                      onChange={(e) => setInputValue(e.target.value)}
-                      onPressEnter={() => handleSendMessage(inputValue)}
-                      disabled={loading}
-                      className={styles.textInput}
-                    />
+                    <AutoComplete
+                      style={{ width: '100%' }}
+                      options={slashSkillOptions}
+                      onSelect={handleSlashSkillSelect}
+                      open={inputValue.startsWith('/') && slashSkillOptions.length > 0}
+                    >
+                      <Input
+                        placeholder="请输入你的问题…（输入 / 选择技能）"
+                        size="large"
+                        value={inputValue}
+                        onChange={(e) => setInputValue(e.target.value)}
+                        onPressEnter={() => handleSendMessage(inputValue)}
+                        disabled={loading}
+                        className={styles.textInput}
+                      />
+                    </AutoComplete>
                     <Button
                       type="primary"
                       size="large"
@@ -400,6 +452,8 @@ const AgentPage = () => {
         return <McpView />;
       case 'knowledge':
         return <KnowledgeView />;
+      case 'skills':
+        return <SkillsView />;
       default:
         return null;
     }
@@ -434,6 +488,7 @@ const AgentPage = () => {
         <Menu mode="inline" className={styles.mainMenu} onSelect={({ key }) => setActiveView(key as ActiveView)} selectedKeys={[activeView]} items={[
             { key: 'mcp', icon: <DatabaseOutlined />, label: 'MCP 管理' },
             { key: 'knowledge', icon: <BookOutlined />, label: '知识库' },
+            { key: 'skills', icon: <ThunderboltOutlined />, label: 'Skill 管理' },
         ]}/>
         <Divider className={styles.siderDivider} />
         <div className={styles.historyList}>
@@ -502,25 +557,44 @@ const AgentPage = () => {
           <Footer className={styles.footer}>
             {error && <Alert title={error} type="error" showIcon className={styles.errorAlert} />}
             <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'flex-end' }}>
-              <Select
-                allowClear
-                placeholder="选择本轮对话使用的知识库（可选）"
-                style={{ width: 320 }}
-                value={selectedCollectionId ?? undefined}
-                onChange={(value) => setSelectedCollectionId(value ?? null)}
-                options={collectionsForChat.map((c) => ({ label: c.name, value: c.id }))}
-              />
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <Select
+                  allowClear
+                  placeholder="选择本轮对话使用的知识库（可选）"
+                  style={{ width: 300 }}
+                  value={selectedCollectionId ?? undefined}
+                  onChange={(value) => setSelectedCollectionId(value ?? null)}
+                  options={collectionsForChat.map((c) => ({ label: c.name, value: c.id }))}
+                />
+                {selectedSkillName && (
+                  <Tag
+                    closable
+                    onClose={() => setSelectedSkillName(null)}
+                    color="blue"
+                    style={{ marginInlineEnd: 0 }}
+                  >
+                    Skill: {selectedSkillName}
+                  </Tag>
+                )}
+              </div>
             </div>
             <div className={styles.inputWithSend}>
-              <Input
-                placeholder="Type your message here..."
-                size="large"
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onPressEnter={() => handleSendMessage(inputValue)}
-                disabled={loading}
-                className={styles.textInput}
-              />
+              <AutoComplete
+                style={{ width: '100%' }}
+                options={slashSkillOptions}
+                onSelect={handleSlashSkillSelect}
+                open={inputValue.startsWith('/') && slashSkillOptions.length > 0}
+              >
+                <Input
+                  placeholder="Type your message here... (type / to choose skill)"
+                  size="large"
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onPressEnter={() => handleSendMessage(inputValue)}
+                  disabled={loading}
+                  className={styles.textInput}
+                />
+              </AutoComplete>
               <Button
                 type="primary"
                 size="large"

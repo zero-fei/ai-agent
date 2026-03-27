@@ -58,6 +58,56 @@
 - `X-MCP-Plan-Action`：`manual_call` / `call_tool` / `no_tool` / `none`
 - `X-MCP-Plan-Tool`：如 `HelloWordMcp/hello`
 
+### Agent Skill（文件驱动，只读管理）
+
+Skill 不走数据库，统一存放在项目目录 `skills/*.md`，并采用固定模板。应用内用户只能查看与使用 Skill，不能在页面里编辑；Skill 变更通过 Agent 修改 md 文件完成。
+
+#### 存储与格式
+
+- 存储目录：`skills/`
+- 每个 Skill 一个 markdown 文件（例如 `skills/frontend-code-review.md`）
+- 必填 frontmatter：
+  - `name`
+  - `description`
+- 必填章节：
+  - `# <title>`
+  - `## Intent`
+  - `## Checklist`
+  - `## Review Process`
+  - `## Required output`
+- `## Required output` 内必须包含 `Template A` 与 `Template B`
+
+格式不合法的 Skill 会被标记为 `invalid`，并在自动选择时跳过。
+
+#### API（只读）
+
+- `GET /api/skills`：返回 Skill 列表（含 `valid/errors`）
+- `GET /api/skills/{name}`：返回 Skill 详情与全文内容
+
+> 不提供 `POST/PATCH/DELETE /api/skills`；前端无编辑入口。
+
+#### 对话接入
+
+`/api/chat` 支持：
+
+- `skillName`（可选）：手动指定 Skill
+- `skillArgs`（可选）：Skill 参数 JSON 对象
+
+执行优先级：
+
+1) 手动 `skillName` 优先  
+2) 未手动指定时，模型会通过 function calling 自动选择 Skill（仅从 `valid` Skill 中选）  
+3) 无命中则走默认对话链路
+
+若 Skill frontmatter 配置了 `allowedTools`，MCP 自动工具选择会被限制在白名单内。
+
+#### 可观测性（响应头）
+
+- `X-Skill-Mode`：`manual` / `auto` / `none`
+- `X-Skill-Name`：命中的 Skill 名称（无则为空）
+- `X-MCP-Plan-Mode`：`manual` / `direct_name` / `function_calling` / `none`
+- `X-MCP-Function-Name`：MCP function calling 命中的函数名
+
 ### 本地启动
 
 1) 安装依赖：

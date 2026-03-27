@@ -15,10 +15,17 @@
 
 .sider {
   border-right: 1px solid #f0f0f0;
+  height: 100vh;
+}
+
+.sider :global(.ant-layout-sider-children) {
   display: flex;
   flex-direction: column;
+  height: 100%;
+  min-height: 0;
   padding: 16px;
   position: relative;
+  overflow: hidden;
 }
 
 .siderHeader {
@@ -55,8 +62,9 @@
 
 .historyList {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  margin-bottom: 80px;
+  padding-bottom: 88px;
 }
 
 .historyItem {
@@ -360,6 +368,15 @@
 .kbPreviewText {
   margin: 0;
   max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+.skillPreviewText {
+  margin: 0;
+  max-height: 420px;
   overflow: auto;
   white-space: pre-wrap;
   font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
