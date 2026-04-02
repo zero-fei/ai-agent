@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
-import { runHealthCheck } from '@/lib/mcp';
 
 const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+const getJavaBaseUrl = () => {
+  const toolGateway = process.env.MCP_JAVA_TOOL_GATEWAY_URL || '';
+  const derived = toolGateway.replace(/\/mcp\/tool\/call\/?$/, '');
+  return process.env.MCP_JAVA_SERVICE_BASE_URL || derived || 'http://localhost:18081';
+};
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -12,8 +17,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const { id } = await params;
-    const result = await runHealthCheck({ userId: user.id, serverId: id });
-    return NextResponse.json(result);
+    const javaBaseUrl = getJavaBaseUrl();
+    const resp = await fetch(`${javaBaseUrl}/mcp/servers/${id}/health`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await resp.json().catch(() => null);
+    return NextResponse.json(data, { status: resp.status });
   } catch (error: unknown) {
     const msg = getErrorMessage(error);
     const status = msg.includes('already in progress')

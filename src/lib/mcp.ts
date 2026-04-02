@@ -441,8 +441,9 @@ export async function callServerTool(params: {
   serverKey: string;
   toolName: string;
   arguments?: JsonRecord;
+  authToken?: string;
 }) {
-  const { userId, serverKey, toolName, arguments: args = {} } = params;
+  const { userId, serverKey, toolName, arguments: args = {}, authToken } = params;
   const server = getServerByKey({ userId, serverKey, enabledOnly: true });
   if (!server) {
     throw new Error(`Enabled MCP server not found: ${serverKey}`);
@@ -455,151 +456,51 @@ export async function callServerTool(params: {
 
   activeOps.add(lockKey);
   try {
-    writeLog({
-      userId,
-      serverId: server.id,
-      action: `tool_call:${toolName}`,
-      status: 'running',
-      message: 'Tool call started',
-      meta: { arguments: args },
-    });
+    // Java-only mode: tool execution must go through Java gateway.
+    const javaGateway = process.env.MCP_JAVA_TOOL_GATEWAY_URL?.trim();
+    if (!javaGateway) throw new Error('MCP_JAVA_TOOL_GATEWAY_URL is not configured.');
+    if (!authToken?.trim()) throw new Error('Missing authToken for MCP Java gateway.');
 
-    const parseResponse = async (response: Response) => {
-      const text = await response.text();
-      let parsed: unknown = text;
-      try {
-        parsed = text ? (JSON.parse(text) as unknown) : null;
-      } catch {
-        parsed = text;
-      }
-      return parsed;
-    };
+    const javaCallUrl = javaGateway.replace(/\/$/, '').endsWith('/mcp/tool/call')
+      ? javaGateway.replace(/\/$/, '')
+      : `${javaGateway.replace(/\/$/, '')}/mcp/tool/call`;
 
-    // 0) Local Node runtime first: allow user-defined tool code in MCP config JSON.
-    // Config format:
-    // {
-    //   "runtime": "node",
-    //   "tools": { "hello": "return 'hello world';" }
-    // }
-    const cfg = (server.config || {}) as LocalNodeRuntimeConfig;
-    const localToolCode = cfg.runtime === 'node' && cfg.tools ? cfg.tools[toolName] : undefined;
-    if (typeof localToolCode === 'string' && localToolCode.trim()) {
-      const context = vm.createContext({
-        args,
+    const resp = await fetch(javaCallUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({
         serverKey,
         toolName,
-        console,
-        JSON,
-      });
-      const wrappedCode = `
-        (async function() {
-          const tool = async (args) => {
-            ${localToolCode}
-          };
-          return await tool(args);
-        })()
-      `;
-      try {
-        const script = new vm.Script(wrappedCode);
-        const result = await script.runInContext(context, { timeout: 2000 });
-        writeLog({
-          userId,
-          serverId: server.id,
-          action: `tool_call:${toolName}`,
-          status: 'ok',
-          message: 'Tool call succeeded (local node runtime)',
-        });
-        return { server, toolName, result };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        writeLog({
-          userId,
-          serverId: server.id,
-          action: `tool_call:${toolName}`,
-          status: 'error',
-          message: `Local node runtime failed: ${message}`,
-        });
-        throw new Error(`Local node runtime failed: ${message}`);
-      }
-    }
-
-    // Prefer direct MCP bridge first (acts like built-in call channel).
-    // If unavailable or failed, fallback to configured endpoint.
-    const bridgeUrl = process.env.MCP_DIRECT_BRIDGE_URL?.trim();
-    let parsed: unknown = null;
-    let success = false;
-    let lastErrorMessage = '';
-
-    if (bridgeUrl) {
-      try {
-        const bridgeRes = await fetch(bridgeUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            serverKey,
-            toolName,
-            arguments: args,
-          }),
-        });
-        parsed = await parseResponse(bridgeRes);
-        if (bridgeRes.ok) {
-          success = true;
-        } else {
-          lastErrorMessage = `Direct bridge failed with HTTP ${bridgeRes.status}`;
-        }
-      } catch (err) {
-        lastErrorMessage = err instanceof Error ? err.message : String(err);
-      }
-    }
-
-    if (!success) {
-      if (!server.endpoint?.trim()) {
-        const missingEndpointMessage = bridgeUrl
-          ? `MCP direct bridge failed (${lastErrorMessage || 'unknown error'}) and endpoint is not configured: ${serverKey}`
-          : `MCP direct bridge is not configured and endpoint is not configured: ${serverKey}. Set MCP_DIRECT_BRIDGE_URL or fill endpoint in MCP management.`;
-        writeLog({
-          userId,
-          serverId: server.id,
-          action: `tool_call:${toolName}`,
-          status: 'error',
-          message: missingEndpointMessage,
-        });
-        throw new Error(missingEndpointMessage);
-      }
-
-      const endpointRes = await fetch(server.endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          serverKey,
-          toolName,
-          arguments: args,
-        }),
-      });
-      parsed = await parseResponse(endpointRes);
-      if (!endpointRes.ok) {
-        const message = `Endpoint fallback failed with HTTP ${endpointRes.status}`;
-        writeLog({
-          userId,
-          serverId: server.id,
-          action: `tool_call:${toolName}`,
-          status: 'error',
-          message,
-          meta: { response: parsed },
-        });
-        throw new Error(message);
-      }
-    }
-
-    writeLog({
-      userId,
-      serverId: server.id,
-      action: `tool_call:${toolName}`,
-      status: 'ok',
-      message: 'Tool call succeeded',
+        arguments: args,
+      }),
     });
 
-    return { server, toolName, result: parsed };
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      const msg =
+        (data &&
+        typeof data === 'object' &&
+        data !== null &&
+        'error' in data &&
+        typeof (data as { error?: unknown }).error !== 'undefined'
+          ? String((data as { error?: unknown }).error)
+          : null) || `Java tool call failed: ${resp.status}`;
+      throw new Error(msg);
+    }
+
+    const javaResult =
+      data &&
+      typeof data === 'object' &&
+      data !== null &&
+      'result' in data
+        ? (data as { result?: unknown }).result
+        : data;
+    return { server, toolName, result: javaResult };
+
+    // Note: legacy Node execution path has been removed (java-only).
   } finally {
     activeOps.delete(lockKey);
   }

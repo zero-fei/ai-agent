@@ -316,18 +316,71 @@ const AgentPage = () => {
       let fullText = '';
       let pendingText = '';
       let rafId: number | null = null;
+      let sseBuffer = '';
+      let lastEventName: string | null = null;
 
       const flushPendingText = () => {
         const textToApply = pendingText;
         setMessages(prev => prev.map(msg => msg.id === agentMessageId ? { ...msg, text: textToApply } : msg));
       };
 
+      const handleSseEvent = (eventName: string | null, data: string) => {
+        const name = eventName || 'message';
+        if (name === 'delta') {
+          fullText += data;
+          pendingText = fullText;
+        } else if (name === 'end') {
+          try {
+            const parsed = JSON.parse(data) as { conversationId?: string };
+            if (parsed?.conversationId && !currentConversationId) {
+              setCurrentConversationId(parsed.conversationId);
+              fetchHistory();
+            }
+          } catch {
+            // ignore
+          }
+        } else if (name === 'error') {
+          // Try to surface server error.
+          try {
+            const parsed = JSON.parse(data) as { error?: string };
+            if (parsed?.error) throw new Error(parsed.error);
+          } catch {
+            throw new Error(data || 'SSE error');
+          }
+        } else {
+          // Unknown event: treat as text chunk
+          fullText += data;
+          pendingText = fullText;
+        }
+      };
+
       while (!done) {
         const { value, done: readerDone } = await reader.read();
         done = readerDone;
         const chunk = decoder.decode(value, { stream: true });
-        fullText += chunk;
-        pendingText = fullText;
+        sseBuffer += chunk;
+
+        // Parse SSE frames separated by blank line.
+        let idx;
+        while ((idx = sseBuffer.indexOf('\n\n')) >= 0) {
+          const frame = sseBuffer.slice(0, idx);
+          sseBuffer = sseBuffer.slice(idx + 2);
+
+          const lines = frame.split('\n').map((l) => l.replace(/\r$/, ''));
+          let eventName: string | null = null;
+          let dataLines: string[] = [];
+          for (const line of lines) {
+            if (line.startsWith('event:')) {
+              eventName = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              dataLines.push(line.slice(5).trimStart());
+            }
+          }
+          const data = dataLines.join('\n');
+          if (!data && !eventName) continue;
+          lastEventName = eventName ?? lastEventName;
+          handleSseEvent(eventName ?? lastEventName, data);
+        }
 
         if (rafId === null) {
           rafId = window.requestAnimationFrame(() => {

@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
-import { deleteServer, setServerEnabled, updateServer } from '@/lib/mcp';
 
 const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+const getJavaBaseUrl = () => {
+  const toolGateway = process.env.MCP_JAVA_TOOL_GATEWAY_URL || '';
+  const derived = toolGateway.replace(/\/mcp\/tool\/call\/?$/, '');
+  return process.env.MCP_JAVA_SERVICE_BASE_URL || derived || 'http://localhost:18081';
+};
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -19,21 +24,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       config?: Record<string, unknown> | null;
       enabled?: boolean;
     };
-
-    if (typeof body.enabled === 'boolean') {
-      const server = setServerEnabled({ userId: user.id, serverId: id, enabled: body.enabled });
-      return NextResponse.json(server);
-    }
-
-    const server = updateServer({
-      userId: user.id,
-      serverId: id,
-      name: body.name,
-      serverKey: body.serverKey,
-      endpoint: body.endpoint,
-      config: body.config,
+    const javaBaseUrl = getJavaBaseUrl();
+    const resp = await fetch(`${javaBaseUrl}/mcp/servers/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
     });
-    return NextResponse.json(server);
+    const data = await resp.json().catch(() => null);
+    return NextResponse.json(data, { status: resp.status });
   } catch (error: unknown) {
     const msg = getErrorMessage(error);
     const status = msg.includes('not found') ? 404 : 500;
@@ -49,8 +47,13 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const { id } = await params;
-    const result = deleteServer({ userId: user.id, serverId: id });
-    return NextResponse.json(result);
+    const javaBaseUrl = getJavaBaseUrl();
+    const resp = await fetch(`${javaBaseUrl}/mcp/servers/${id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await resp.json().catch(() => null);
+    return NextResponse.json(data, { status: resp.status });
   } catch (error: unknown) {
     const msg = getErrorMessage(error);
     const status = msg.includes('not found') ? 404 : 500;

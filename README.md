@@ -108,7 +108,12 @@ Skill 不走数据库，统一存放在项目目录 `skills/*.md`，并采用固
 - `X-MCP-Plan-Mode`：`manual` / `direct_name` / `function_calling` / `none`
 - `X-MCP-Function-Name`：MCP function calling 命中的函数名
 
-### 本地启动
+### 本地启动（Next + Java Agent Service）
+
+#### 环境要求
+
+- **Node.js**：建议 **18.18+**，推荐 **20+**（当前项目使用 Next 16 / React 19，Node 14 会出现 `node:timers/promises` 等内置模块缺失错误）
+- **Java**：21+
 
 1) 安装依赖：
 
@@ -130,10 +135,45 @@ DASHSCOPE_BASE_URL=https://coding.dashscope.aliyuncs.com/v1
 MCP_DIRECT_BRIDGE_URL=http://localhost:8787/mcp/call
 ```
 
-3) 启动开发服务器：
+3) 启动 Java Agent Service：
+
+**注意：聊天与记忆抽取由 Java 直连 DashScope 兼容接口**，`DASHSCOPE_API_KEY` 等必须对 **Java 进程**生效。仅写在项目根 `.env.local` 里 **不会** 被 Spring Boot 自动加载；需在启动前导出环境变量，或在 IDE 运行配置里填写。
+
+```bash
+# 示例（与 .env.local 中 key 保持一致）
+export DASHSCOPE_API_KEY=你的Key
+# 可选：与默认不同的兼容模式地址（默认见 java ChatService 中 DASHSCOPE_COMPAT_BASE_URL）
+# export DASHSCOPE_COMPAT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+cd java/agent-service
+mvn -DskipTests spring-boot:run
+```
+
+Windows PowerShell：
+
+```powershell
+$env:DASHSCOPE_API_KEY="你的Key"
+cd java/agent-service; mvn -DskipTests spring-boot:run
+```
+
+若出现 **`LLM HTTP 401`**，表示通义侧拒绝鉴权：检查 Key 是否有效、是否已传给 Java、以及 `DASHSCOPE_COMPAT_BASE_URL` 是否与 Key 类型（国际站/北京地域等）一致。
+
+4) 在项目根目录 `.env.local` 增加 Java 网关地址：
+
+```bash
+MCP_JAVA_SERVICE_BASE_URL=http://localhost:18081
+MCP_JAVA_TOOL_GATEWAY_URL=http://localhost:18081
+```
+
+5) 启动 Next.js 开发服务器：
 
 ```bash
 npm run dev
+```
+
+**或**在已配置 `.env.local` 的前提下，一条命令同时起 Next 与 Java（依赖 `devDependencies` 中的 `concurrently`，随 `npm install` 安装）：
+
+```bash
+npm run dev:all
 ```
 
 打开 `http://localhost:3000`。
@@ -141,8 +181,14 @@ npm run dev
 ### 常用脚本
 
 ```bash
-# 开发
+# 仅前端
 npm run dev
+
+# 仅 Java Agent Service（等价于在 java/agent-service 下 mvn spring-boot:run）
+npm run dev:java
+
+# Next + Java 并行（Ctrl+C 会结束两个进程）
+npm run dev:all
 
 # 构建
 npm run build
@@ -162,8 +208,9 @@ npm run lint
 - `src/lib/auth.ts`：用户/会话（SQLite）逻辑
 - `src/lib/db.ts`：SQLite 连接
 - `src/lib/llm.ts`：LangChain 调用与流式输出封装
-- `src/lib/mcp.ts`：MCP Server 管理、工具执行、日志
+- `src/lib/mcp.ts`：MCP Server 管理、工具执行、日志（java_only）
 - `src/lib/rag.ts`：RAG 入库/检索与 prompt 构建
+- `java/agent-service/*`：Java 侧 Agent 后端（chat/mcp/memory/rag）
 
 ### 说明与约束
 
@@ -171,11 +218,8 @@ npm run lint
 - **鉴权**：API 主要通过 `auth-token` cookie 识别用户，会话在请求中会自动续期。
 - **消息角色**：LLM 输入目前只接收 `user/assistant` 角色（会过滤掉其它 role），如需 `system` 消息请同步扩展 `src/lib/llm.ts` 的消息类型与 prompt 组装逻辑。
 - **System Prompt 规则**：`defaultSystemPrompt` 始终在前，API 传入的 `systemPrompt` 会拼接在后。
-- **MCP 调用优先级**：
-  1) 本地 Node runtime（`config.runtime=node` + `config.tools`）  
-  2) `MCP_DIRECT_BRIDGE_URL` 直连  
-  3) Server `endpoint` fallback
-- **本地 Node 工具安全性**：`config.tools` 中的 JS 代码会在服务端执行（`vm` 沙箱 + 超时），生产环境建议增加白名单、隔离与审计。
+- **MCP 调用模式（当前）**：Next API 会将工具调用转发到 Java 网关（`MCP_JAVA_TOOL_GATEWAY_URL`），不再使用 Node fallback。
+- **Java 工具执行**：Java 侧支持本地 JS 工具（GraalVM）与 endpoint/bridge 调用，建议生产环境配置白名单与审计策略。
 
 ### RAG 知识库（已接入）
 
