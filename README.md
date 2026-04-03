@@ -44,19 +44,14 @@
 
 - 标准：`@mcp(serverKey,toolName) {"arg":"value"}`
 - 简化：`@mcp(serverKey) {"arg":"value"}`（仅当该 server 只有一个工具）
-- 自然语言：`调用serverKey {"arg":"value"}`（同上）
+- 自然语言：输入包含“调用/执行/工具/tool/call”等关键词时，会尝试命中 serverKey/toolName 并触发调用（否则不触发）
 
-此外，普通聊天会先走一轮「工具规划」：
+此外，普通聊天在“疑似需要动作/外部查询”时会走一轮「工具规划」：
 
-1. Agent 将可用工具清单注入给模型  
-2. 模型返回 `call_tool` / `no_tool` 决策  
-3. 若 `call_tool`，Agent 调用 MCP 工具  
-4. 工具结果回灌给模型，生成最终回答
-
-开发环境可通过响应头观察决策：
-
-- `X-MCP-Plan-Action`：`manual_call` / `call_tool` / `no_tool` / `none`
-- `X-MCP-Plan-Tool`：如 `HelloWordMcp/hello`
+1. 手动 `@mcp(...)` 优先  
+2. 其次启发式（关键词/命中 serverKey/toolName）  
+3. 仅当输入看起来像要执行动作/查询外部数据时，才会调用一次 LLM 做 JSON 决策（避免每次聊天都额外耗时）
+4. 若命中 MCP：先调用工具，再把工具结果回灌给模型生成最终回答
 
 ### Agent Skill（文件驱动，只读管理）
 
@@ -93,20 +88,9 @@ Skill 不走数据库，统一存放在项目目录 `skills/*.md`，并采用固
 - `skillName`（可选）：手动指定 Skill
 - `skillArgs`（可选）：Skill 参数 JSON 对象
 
-执行优先级：
+当前实现为“手动选择 Skill”：仅当传入 `skillName` 时，Java 会读取 `skills/{skillName}.md` 内容并注入 system prompt。
 
-1) 手动 `skillName` 优先  
-2) 未手动指定时，模型会通过 function calling 自动选择 Skill（仅从 `valid` Skill 中选）  
-3) 无命中则走默认对话链路
-
-若 Skill frontmatter 配置了 `allowedTools`，MCP 自动工具选择会被限制在白名单内。
-
-#### 可观测性（响应头）
-
-- `X-Skill-Mode`：`manual` / `auto` / `none`
-- `X-Skill-Name`：命中的 Skill 名称（无则为空）
-- `X-MCP-Plan-Mode`：`manual` / `direct_name` / `function_calling` / `none`
-- `X-MCP-Function-Name`：MCP function calling 命中的函数名
+后端实现位置：[ChatService.java](file:///f:/huya/kefu/zx-ai-agent/agent-app/java/agent-service/src/main/java/com/agentservice/service/ChatService.java)
 
 ### 本地启动（Next + Java Agent Service）
 
@@ -127,8 +111,19 @@ npm install
 # 必填：DashScope / 通义模型 API Key
 DASHSCOPE_API_KEY=xxxxx
 
-# 可选：自定义 baseURL（默认 https://coding.dashscope.aliyuncs.com/v1）
-DASHSCOPE_BASE_URL=https://coding.dashscope.aliyuncs.com/v1
+# 可选：自定义 baseURL（推荐使用 compatible-mode）
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+
+# 可选：对话模型（默认 qwen-plus）
+DASHSCOPE_CHAT_MODEL=qwen-plus
+
+# 可选：慢请求阈值（毫秒），超过会输出 chat_timing_slow 日志
+CHAT_SLOW_MS=8000
+
+# 可选：Embeddings（用于 RAG/Memory 检索）
+DASHSCOPE_API_KEY_EMBEDDINGS=xxxxx
+DASHSCOPE_EMBEDDINGS_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+DASHSCOPE_EMBEDDING_MODEL=text-embedding-v2
 
 # 可选：MCP 直连桥接地址（优先于 endpoint fallback）
 # 未配置时，工具调用会使用 MCP 管理页中的 endpoint
@@ -137,13 +132,13 @@ MCP_DIRECT_BRIDGE_URL=http://localhost:8787/mcp/call
 
 3) 启动 Java Agent Service：
 
-**注意：聊天与记忆抽取由 Java 直连 DashScope 兼容接口**，`DASHSCOPE_API_KEY` 等必须对 **Java 进程**生效。仅写在项目根 `.env.local` 里 **不会** 被 Spring Boot 自动加载；需在启动前导出环境变量，或在 IDE 运行配置里填写。
+**注意：聊天与记忆抽取由 Java 直连 DashScope 兼容接口**，`DASHSCOPE_API_KEY` 等必须对 **Java 进程**生效。本项目会在 Java 启动时尝试从项目根目录向上查找 `.env.local` 并注入为 JVM System properties（不打印 value），便于本地开发。
+
+实现位置：[AgentServiceApplication.java](file:///f:/huya/kefu/zx-ai-agent/agent-app/java/agent-service/src/main/java/com/agentservice/AgentServiceApplication.java)
 
 ```bash
 # 示例（与 .env.local 中 key 保持一致）
 export DASHSCOPE_API_KEY=你的Key
-# 可选：与默认不同的兼容模式地址（默认见 java ChatService 中 DASHSCOPE_COMPAT_BASE_URL）
-# export DASHSCOPE_COMPAT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 cd java/agent-service
 mvn -DskipTests spring-boot:run
 ```
@@ -177,6 +172,21 @@ npm run dev:all
 ```
 
 打开 `http://localhost:3000`。
+
+### 性能与日志（排查“为什么慢”）
+
+Java 侧会输出分阶段耗时日志，推荐用来定位是“前置处理慢”还是“模型首字慢”：
+
+- `chat_timing_preflight`：从请求开始到发起主 LLM 流之前的耗时（包含落库、并行的 RAG/Memory/Skill、MCP 选择等）
+  - `preflightMs`：前置总耗时
+  - `promptChars`：system + 最新用户输入的字符数（用于判断 prompt 是否过大）
+- `chat_timing_total`：主链路总耗时（不包含异步记忆抽取）
+  - `llmConnectMs`：建立到 LLM 流响应的耗时
+  - `ttftMs`：首 token 时间
+  - `streamMs`：流式读取总时间
+  - `totalMs`：请求总耗时（到 end 事件发送完成为止）
+- `chat_timing_slow`：当 `totalMs >= CHAT_SLOW_MS` 时输出告警
+- `chat_async_memory_done`：异步记忆抽取耗时（不会阻塞用户看到回答结束）
 
 ### 常用脚本
 
@@ -218,6 +228,7 @@ npm run lint
 - **鉴权**：API 主要通过 `auth-token` cookie 识别用户，会话在请求中会自动续期。
 - **消息角色**：LLM 输入目前只接收 `user/assistant` 角色（会过滤掉其它 role），如需 `system` 消息请同步扩展 `src/lib/llm.ts` 的消息类型与 prompt 组装逻辑。
 - **System Prompt 规则**：`defaultSystemPrompt` 始终在前，API 传入的 `systemPrompt` 会拼接在后。
+- **安全**：不要提交真实密钥到仓库。若曾提交过 `.env.local` 或 Key，请尽快轮换密钥并从版本库移除敏感信息。
 - **MCP 调用模式（当前）**：Next API 会将工具调用转发到 Java 网关（`MCP_JAVA_TOOL_GATEWAY_URL`），不再使用 Node fallback。
 - **Java 工具执行**：Java 侧支持本地 JS 工具（GraalVM）与 endpoint/bridge 调用，建议生产环境配置白名单与审计策略。
 
