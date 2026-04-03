@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.agentservice.dto.ChatDtos.ChatRequestBody;
 import com.agentservice.dto.ChatDtos.IncomingMessage;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -30,6 +32,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -46,6 +51,7 @@ import java.util.regex.Pattern;
  */
 @Service
 public class ChatService {
+  private static final Logger log = LoggerFactory.getLogger(ChatService.class);
 
   // 手动 MCP：@mcp(serverKey, toolName) {argsJson?}
   private static final Pattern MCP_WITH_TOOL = Pattern.compile(
@@ -61,6 +67,7 @@ public class ChatService {
   private final McpToolService mcpToolService;
 
   private final HttpClient httpClient = HttpClient.newHttpClient();
+  private final ExecutorService executor = Executors.newFixedThreadPool(16);
 
   /** 通义/ DashScope 主 Key（聊天/补全） */
   @Value("${DASHSCOPE_API_KEY:}") private String dashscopeApiKey;
@@ -70,7 +77,7 @@ public class ChatService {
   @Value("${DASHSCOPE_COMPAT_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}")
   private String dashscopeCompatBaseUrl;
   /** 对话模型名 */
-  @Value("${DASHSCOPE_CHAT_MODEL:qwen3.5-plus}") private String chatModel;
+  @Value("${DASHSCOPE_CHAT_MODEL:qwen-plus}") private String chatModel;
 
   /** embeddings Key（用于 RAG/Memory 检索；未配置则退化为不检索） */
   @Value("${DASHSCOPE_API_KEY_EMBEDDINGS:}") private String dashscopeEmbeddingKey;
@@ -78,6 +85,7 @@ public class ChatService {
   @Value("${DASHSCOPE_EMBEDDINGS_BASE_URL:}") private String dashscopeEmbeddingsBaseUrl;
   /** embeddings 模型名 */
   @Value("${DASHSCOPE_EMBEDDING_MODEL:text-embedding-v2}") private String embeddingModel;
+  @Value("${CHAT_SLOW_MS:8000}") private long chatSlowMs;
 
   /** 可覆盖 skills 目录（用于读取 skills/*.md） */
   @Value("${SKILLS_DIR:}") private String skillsDirOverride;
@@ -93,6 +101,7 @@ public class ChatService {
    * 通过 emitter 向前端推送 {@code event: delta/end/error}。
    */
   public void handleChatSse(String userId, String authorization, ChatRequestBody body, SseEmitter emitter) throws Exception {
+    long requestStartNs = System.nanoTime();
     if (blank(dashscopeApiKey)) {
       // 不泄露 value，只给定位提示
       emitter.send(SseEmitter.event().name("error").data((Object) Map.of(
@@ -110,22 +119,43 @@ public class ChatService {
       return;
     }
 
+    long startNs = System.nanoTime();
     String conversationId = ensureConversation(userId, body.conversationId, incoming);
     String latestUserText = Optional.ofNullable(incoming.get(incoming.size() - 1).content).orElse("");
     saveMessage(conversationId, incoming.get(incoming.size() - 1).role, latestUserText);
+    long persistUserMs = elapsedMs(startNs);
 
-    // system 提示由：固定人设 + RAG + Memory + Skill
-    String system = merge(
-        "你是一个严谨助手。",
-        buildRagPrompt(userId, body.collectionId, latestUserText),
-        buildMemoryPrompt(userId, latestUserText),
-        buildSkillPrompt(body.skillName)
-    );
+    // Parallel Preflight Tasks: Embedding, Skill, MCP Decision
+    CompletableFuture<double[]> embedFuture = CompletableFuture.supplyAsync(() -> {
+      try { return embed(latestUserText); } catch (Exception e) { return new double[0]; }
+    }, executor);
 
-    // MCP 决策：手动优先，其次启发式，再否则 LLM JSON 决策
-    McpParsed mcp = parseManualMcp(latestUserText);
-    if (mcp == null) mcp = detectAutoMcp(userId, latestUserText);
-    if (mcp == null) mcp = planAutoMcpByLlm(userId, latestUserText);
+    CompletableFuture<String> skillFuture = CompletableFuture.supplyAsync(() -> buildSkillPrompt(body.skillName), executor);
+
+    CompletableFuture<McpParsed> mcpFuture = CompletableFuture.supplyAsync(() -> {
+      // 只有在用户输入可能包含指令或关键词时才尝试 LLM 决策，减少盲目调用 LLM 带来的 9s 延迟
+      String lower = latestUserText.toLowerCase(Locale.ROOT);
+      boolean possibleAction = lower.contains("调用") || lower.contains("执行") || lower.contains("工具") 
+          || lower.contains("查询") || lower.contains("获取") || lower.contains("tool") || lower.contains("call")
+          || lower.contains("check") || lower.contains("search") || lower.contains("mcp");
+
+      McpParsed m = parseManualMcp(latestUserText);
+      if (m == null) m = detectAutoMcp(userId, latestUserText);
+      if (m == null && possibleAction) m = planAutoMcpByLlm(userId, latestUserText);
+      return m;
+    }, executor);
+
+    // RAG and Memory depend on Embedding
+    CompletableFuture<String> ragFuture = embedFuture.thenApplyAsync(emb -> buildRagPrompt(userId, body.collectionId, emb), executor);
+    CompletableFuture<String> memoryFuture = embedFuture.thenApplyAsync(emb -> buildMemoryPrompt(userId, emb), executor);
+
+    // Wait for prompts and mcp decision
+    McpParsed mcp = mcpFuture.join();
+    String ragPrompt = ragFuture.join();
+    String memoryPrompt = memoryFuture.join();
+    String skillPrompt = skillFuture.join();
+
+    String system = merge("你是一个严谨助手。", ragPrompt, memoryPrompt, skillPrompt);
 
     // 构建给 LLM 的 messages：system + 历史 user/assistant
     List<Map<String, Object>> msgs = new ArrayList<>();
@@ -136,15 +166,23 @@ public class ChatService {
       }
     }
 
+    long mcpToolMs = 0L;
     if (mcp != null) {
       String toolName = mcp.toolName != null ? mcp.toolName : resolveDefaultToolName(userId, mcp.serverKey);
+      startNs = System.nanoTime();
       Map<String, Object> called = mcpToolService.callTool(authorization, mcp.serverKey, toolName, mcp.arguments);
+      mcpToolMs = elapsedMs(startNs);
       msgs.add(Map.of("role", "assistant",
           "content", "[MCP工具 " + mcp.serverKey + "/" + toolName + " 原始结果]\\n" + objectMapper.writeValueAsString(called.get("result"))));
       msgs.add(Map.of("role", "user", "content", "请基于上面的 MCP 工具结果给出最终回答。"));
     }
 
-    streamAndPersist(userId, latestUserText, msgs, conversationId, emitter);
+    long preflightMs = elapsedMs(requestStartNs);
+    int totalPromptChars = system.length() + latestUserText.length();
+    log.info(
+        "chat_timing_preflight conversationId={} persistUserMs={} preflightMs={} mcpToolMs={} messageCount={} promptChars={}",
+        conversationId, persistUserMs, preflightMs, mcpToolMs, incoming.size(), totalPromptChars);
+    streamAndPersist(userId, latestUserText, msgs, conversationId, emitter, requestStartNs, preflightMs);
   }
 
   /**
@@ -154,8 +192,11 @@ public class ChatService {
   private void streamAndPersist(String userId, String latestUserText,
       List<Map<String, Object>> messages,
       String conversationId,
-      SseEmitter emitter) throws Exception {
+      SseEmitter emitter,
+      long requestStartNs,
+      long preflightMs) throws Exception {
 
+    long startNs = System.nanoTime();
     HttpRequest req = HttpRequest.newBuilder()
         .uri(URI.create(trim(effectiveChatBaseUrl()) + "/chat/completions"))
         .header("Authorization", "Bearer " + dashscopeApiKey)
@@ -168,7 +209,11 @@ public class ChatService {
         .build();
 
     HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+    long llmConnectMs = elapsedMs(startNs);
     if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+      long totalMs = elapsedMs(requestStartNs);
+      log.warn("chat_timing_error conversationId={} preflightMs={} llmConnectMs={} totalMs={} status={}",
+          conversationId, preflightMs, llmConnectMs, totalMs, resp.statusCode());
       emitter.send(SseEmitter.event().name("error").data((Object) Map.of(
           "error", describeLlmHttpFailure(resp.statusCode())
       )));
@@ -177,6 +222,8 @@ public class ChatService {
     }
 
     StringBuilder full = new StringBuilder();
+    long firstDeltaNs = -1L;
+    long streamStartNs = System.nanoTime();
     try (BufferedReader br = new BufferedReader(new InputStreamReader(resp.body(), StandardCharsets.UTF_8))) {
       String line;
       while ((line = br.readLine()) != null) {
@@ -186,40 +233,61 @@ public class ChatService {
 
         String delta = extractDelta(data);
         if (!delta.isEmpty()) {
+          if (firstDeltaNs < 0) firstDeltaNs = System.nanoTime();
           full.append(delta);
           emitter.send(SseEmitter.event().name("delta").data(delta));
         }
       }
     }
+    long streamMs = elapsedMs(streamStartNs);
+    long ttftMs = firstDeltaNs < 0 ? -1L : elapsedMs(streamStartNs, firstDeltaNs);
 
     String answer = full.toString();
+    startNs = System.nanoTime();
     saveMessage(conversationId, "assistant", answer);
-    upsertMemoriesFromTurn(userId, latestUserText, answer);
+    long saveAssistantMs = elapsedMs(startNs);
+    startNs = System.nanoTime();
     emitter.send(SseEmitter.event().name("end").data((Object) Map.of("conversationId", conversationId)));
     emitter.complete();
+    long endEmitMs = elapsedMs(startNs);
+    long totalMs = elapsedMs(requestStartNs);
+
+    // Asynchronous Memory Upsert (Doesn't block user response)
+    CompletableFuture.runAsync(() -> {
+      long mStart = System.nanoTime();
+      upsertMemoriesFromTurn(userId, latestUserText, answer);
+      log.info("chat_async_memory_done conversationId={} durationMs={}", conversationId, elapsedMs(mStart));
+    }, executor);
+
+    if (totalMs >= chatSlowMs) {
+      log.warn(
+          "chat_timing_slow conversationId={} preflightMs={} llmConnectMs={} ttftMs={} streamMs={} saveAssistantMs={} endEmitMs={} totalMs={} thresholdMs={} answerChars={}",
+          conversationId, preflightMs, llmConnectMs, ttftMs, streamMs, saveAssistantMs, endEmitMs, totalMs, chatSlowMs, answer.length());
+    }
+    log.info(
+        "chat_timing_total conversationId={} preflightMs={} llmConnectMs={} ttftMs={} streamMs={} saveAssistantMs={} endEmitMs={} totalMs={} answerChars={}",
+        conversationId, preflightMs, llmConnectMs, ttftMs, streamMs, saveAssistantMs, endEmitMs, totalMs, answer.length());
   }
 
   /** RAG：对 kb_chunks 按 embedding 相似度排序，取前 5 条拼进 system。 */
-  private String buildRagPrompt(String userId, String collectionId, String query) {
+  private String buildRagPrompt(String userId, String collectionId, double[] queryEmbedding) {
     try {
-      double[] q = embed(query);
-      if (q.length == 0) return null;
+      if (queryEmbedding.length == 0) return null;
 
       List<Map<String, Object>> rows = jdbcTemplate.queryForList(
           "SELECT content, embedding FROM kb_chunks WHERE userId = ? AND collectionId IS ?",
           userId, blank(collectionId) ? null : collectionId);
-
-      rows.sort((a, b) ->
-          Double.compare(
-              cosine(q, parseEmb(Objects.toString(b.get("embedding"), "[]"))),
-              cosine(q, parseEmb(Objects.toString(a.get("embedding"), "[]")))
-          ));
-
       if (rows.isEmpty()) return null;
+      List<Object[]> scored = new ArrayList<>(rows.size());
+      for (Map<String, Object> row : rows) {
+        double score = cosine(queryEmbedding, parseEmb(Objects.toString(row.get("embedding"), "[]")));
+        scored.add(new Object[] {score, Objects.toString(row.get("content"), "")});
+      }
+      scored.sort((a, b) -> Double.compare((double) b[0], (double) a[0]));
 
       StringBuilder sb = new StringBuilder("以下是知识库上下文，优先依据它回答：\\n");
-      for (int i = 0; i < Math.min(5, rows.size()); i++) {
-        sb.append("- ").append(rows.get(i).get("content")).append("\\n");
+      for (int i = 0; i < Math.min(5, scored.size()); i++) {
+        sb.append("- ").append(scored.get(i)[1]).append("\\n");
       }
       return sb.toString();
     } catch (Exception e) {
@@ -228,10 +296,9 @@ public class ChatService {
   }
 
   /** Memory：从 user_memories 里挑相似度 >= 0.35 的若干条拼进 system。 */
-  private String buildMemoryPrompt(String userId, String query) {
+  private String buildMemoryPrompt(String userId, double[] queryEmbedding) {
     try {
-      double[] q = embed(query);
-      if (q.length == 0) return null;
+      if (queryEmbedding.length == 0) return null;
 
       List<Map<String, Object>> rows = jdbcTemplate.queryForList(
           "SELECT content, embedding FROM user_memories WHERE userId = ? AND embedding IS NOT NULL",
@@ -239,7 +306,7 @@ public class ChatService {
 
       List<String> memories = new ArrayList<>();
       for (Map<String, Object> r : rows) {
-        double s = cosine(q, parseEmb(Objects.toString(r.get("embedding"), "[]")));
+        double s = cosine(queryEmbedding, parseEmb(Objects.toString(r.get("embedding"), "[]")));
         if (s >= 0.35) memories.add(Objects.toString(r.get("content"), ""));
       }
       if (memories.isEmpty()) return null;
@@ -601,9 +668,21 @@ public class ChatService {
     return s == null || s.trim().isEmpty();
   }
 
+  private long elapsedMs(long startNs) {
+    return (System.nanoTime() - startNs) / 1_000_000;
+  }
+
+  private long elapsedMs(long startNs, long endNs) {
+    return (endNs - startNs) / 1_000_000;
+  }
+
   private String effectiveChatBaseUrl() {
-    if (!blank(dashscopeBaseUrl)) return dashscopeBaseUrl.trim();
-    return dashscopeCompatBaseUrl;
+    String raw = !blank(dashscopeBaseUrl) ? dashscopeBaseUrl.trim() : dashscopeCompatBaseUrl;
+    String normalized = normalizeChatBaseUrl(raw);
+    if (!Objects.equals(raw, normalized)) {
+      log.warn("检测到不兼容的 DASHSCOPE_BASE_URL，已回退到兼容地址。rawBaseUrl={} normalizedBaseUrl={}", raw, normalized);
+    }
+    return normalized;
   }
 
   private String effectiveEmbeddingsBaseUrl() {
@@ -615,15 +694,21 @@ public class ChatService {
   /** LLM 非 2xx 错误说明（简化版）。 */
   private String describeLlmHttpFailure(int statusCode) {
     return switch (statusCode) {
-      case 401 -> "LLM HTTP 401：通义/DashScope 鉴权失败。请检查 Java 进程的 DASHSCOPE_API_KEY 以及 baseURL 配置并重启。";
+      case 401 -> "LLM HTTP 401：通义/DashScope 鉴权失败。请检查 Java 进程的 DASHSCOPE_API_KEY；若配置了 DASHSCOPE_BASE_URL，请使用 compatible-mode 地址并重启。";
       case 403 -> "LLM HTTP 403：模型/账号无权限或受限。";
       case 429 -> "LLM HTTP 429：请求过于频繁或配额不足。";
       default -> "LLM HTTP " + statusCode;
     };
   }
 
+  private String normalizeChatBaseUrl(String raw) {
+    if (blank(raw)) return dashscopeCompatBaseUrl;
+    String lower = raw.trim().toLowerCase(Locale.ROOT);
+    if (lower.contains("coding.dashscope.aliyuncs.com")) return dashscopeCompatBaseUrl;
+    return raw.trim();
+  }
+
   /** 一次 MCP 调用的解析结果。 */
   private record McpParsed(String serverKey, String toolName, Map<String, Object> arguments) {
   }
 }
-
