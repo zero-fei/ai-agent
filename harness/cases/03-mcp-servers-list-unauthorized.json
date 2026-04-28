@@ -1,0 +1,9 @@
+{
+  "name": "mcp-servers-list-unauthorized",
+  "path": "/api/mcp/servers",
+  "method": "GET",
+  "includeAuth": false,
+  "expectStatus": 401,
+  "expectBodyContains": ["Unauthorized"],
+  "expectTraceId": true
+}

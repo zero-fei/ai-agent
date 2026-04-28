@@ -14,8 +14,11 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.agentservice.dto.McpDtos.McpServerDto;
+import com.agentservice.service.FaultInjectionService;
 import com.agentservice.service.McpAuthService;
 import com.agentservice.service.McpManagementService;
 
@@ -25,13 +28,19 @@ import com.agentservice.service.McpManagementService;
 @RestController
 @RequestMapping("/mcp/servers")
 public class McpServerController {
+  private static final Logger log = LoggerFactory.getLogger(McpServerController.class);
 
   private final McpAuthService authService;
   private final McpManagementService managementService;
+  private final FaultInjectionService faultInjectionService;
 
-  public McpServerController(McpAuthService authService, McpManagementService managementService) {
+  public McpServerController(
+      McpAuthService authService,
+      McpManagementService managementService,
+      FaultInjectionService faultInjectionService) {
     this.authService = authService;
     this.managementService = managementService;
+    this.faultInjectionService = faultInjectionService;
   }
 
   private Optional<String> getUserId(String authorization) {
@@ -40,7 +49,12 @@ public class McpServerController {
 
   /** GET /mcp/servers */
   @GetMapping
-  public ResponseEntity<?> list(@RequestHeader(value = "Authorization", required = false) String authorization) {
+  public ResponseEntity<?> list(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestHeader(value = "X-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Fault-Inject", required = false) String faultInjectHeader) {
+    faultInjectionService.raiseIfRequested(faultInjectHeader, "mcp.servers.list");
+    log.info("mcp_servers_list traceId={}", traceId);
     Optional<String> uidOpt = getUserId(authorization);
     if (uidOpt.isEmpty()) {
       return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
@@ -51,7 +65,11 @@ public class McpServerController {
   /** POST /mcp/servers */
   @PostMapping
   public ResponseEntity<?> create(@RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestHeader(value = "X-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Fault-Inject", required = false) String faultInjectHeader,
       @RequestBody Map<String, Object> body) {
+    faultInjectionService.raiseIfRequested(faultInjectHeader, "mcp.servers.create");
+    log.info("mcp_servers_create traceId={}", traceId);
     Optional<String> uidOpt = getUserId(authorization);
     if (uidOpt.isEmpty()) {
       return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
@@ -80,7 +98,11 @@ public class McpServerController {
    */
   @PatchMapping("/{id}")
   public ResponseEntity<?> update(@RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestHeader(value = "X-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Fault-Inject", required = false) String faultInjectHeader,
       @PathVariable("id") String id, @RequestBody Map<String, Object> body) {
+    faultInjectionService.raiseIfRequested(faultInjectHeader, "mcp.servers.update");
+    log.info("mcp_servers_update traceId={} id={}", traceId, id);
     Optional<String> uidOpt = getUserId(authorization);
     if (uidOpt.isEmpty()) {
       return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
@@ -106,7 +128,11 @@ public class McpServerController {
   /** DELETE /mcp/servers/{id} */
   @DeleteMapping("/{id}")
   public ResponseEntity<?> delete(@RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestHeader(value = "X-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Fault-Inject", required = false) String faultInjectHeader,
       @PathVariable("id") String id) {
+    faultInjectionService.raiseIfRequested(faultInjectHeader, "mcp.servers.delete");
+    log.info("mcp_servers_delete traceId={} id={}", traceId, id);
     Optional<String> uidOpt = getUserId(authorization);
     if (uidOpt.isEmpty()) {
       return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
@@ -119,7 +145,11 @@ public class McpServerController {
   /** POST /mcp/servers/{id}/auth */
   @PostMapping("/{id}/auth")
   public ResponseEntity<?> auth(@RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestHeader(value = "X-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Fault-Inject", required = false) String faultInjectHeader,
       @PathVariable("id") String id) {
+    faultInjectionService.raiseIfRequested(faultInjectHeader, "mcp.servers.auth");
+    log.info("mcp_servers_auth traceId={} id={}", traceId, id);
     Optional<String> uidOpt = getUserId(authorization);
     if (uidOpt.isEmpty()) {
       return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
@@ -134,7 +164,11 @@ public class McpServerController {
   /** POST /mcp/servers/{id}/health */
   @PostMapping("/{id}/health")
   public ResponseEntity<?> health(@RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestHeader(value = "X-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Fault-Inject", required = false) String faultInjectHeader,
       @PathVariable("id") String id) {
+    faultInjectionService.raiseIfRequested(faultInjectHeader, "mcp.servers.health");
+    log.info("mcp_servers_health traceId={} id={}", traceId, id);
     Optional<String> uidOpt = getUserId(authorization);
     if (uidOpt.isEmpty()) {
       return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));

@@ -1,0 +1,12 @@
+{
+  "name": "chat-invalid-body-authorized",
+  "path": "/api/chat",
+  "method": "POST",
+  "requiresToken": true,
+  "body": {
+    "conversationId": "harness-invalid-body"
+  },
+  "expectStatus": 200,
+  "expectSseEvents": ["error"],
+  "expectTraceId": true
+}

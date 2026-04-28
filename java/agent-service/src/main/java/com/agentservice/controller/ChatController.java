@@ -2,8 +2,10 @@ package com.agentservice.controller;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 import com.agentservice.service.ChatService;
+import com.agentservice.service.FaultInjectionService;
 import com.agentservice.service.McpAuthService;
 import com.agentservice.dto.ChatDtos.ChatRequestBody;
 import org.slf4j.Logger;
@@ -24,10 +26,12 @@ public class ChatController {
 
   private final McpAuthService authService;
   private final ChatService chatService;
+  private final FaultInjectionService faultInjectionService;
 
-  public ChatController(McpAuthService authService, ChatService chatService) {
+  public ChatController(McpAuthService authService, ChatService chatService, FaultInjectionService faultInjectionService) {
     this.authService = authService;
     this.chatService = chatService;
+    this.faultInjectionService = faultInjectionService;
   }
 
   /**
@@ -38,32 +42,37 @@ public class ChatController {
   @PostMapping(value = "/api/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
   public SseEmitter chat(
       @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestHeader(value = "X-Trace-Id", required = false) String traceIdHeader,
+      @RequestHeader(value = "X-Fault-Inject", required = false) String faultInjectHeader,
       @RequestBody ChatRequestBody body) {
+    String traceId = (traceIdHeader == null || traceIdHeader.isBlank()) ? UUID.randomUUID().toString() : traceIdHeader.trim();
 
     SseEmitter emitter = new SseEmitter(0L);
 
     new Thread(() -> {
       try {
         int msgCount = body == null || body.messages == null ? 0 : body.messages.size();
-        log.info("Java ChatController hit: hasAuthHeader={}, msgCount={}, hasConversationId={}",
+        faultInjectionService.raiseIfRequested(faultInjectHeader, "chat.pre_auth");
+        log.info("chat_entry traceId={} hasAuthHeader={} msgCount={} hasConversationId={}",
+            traceId,
             authorization != null && !authorization.isBlank(),
             msgCount,
             body != null && body.conversationId != null && !body.conversationId.isBlank());
 
         Optional<String> uidOpt = authService.getUserIdFromAuthorization(authorization);
         if (uidOpt.isEmpty()) {
-          log.warn("Java ChatController unauthorized: userId not found/expired.");
-          emitter.send(SseEmitter.event().name("error").data(Map.of("error", "Unauthorized")));
+          log.warn("chat_unauthorized traceId={} userId not found/expired", traceId);
+          emitter.send(SseEmitter.event().name("error").data(Map.<String, Object>of("error", "Unauthorized")));
           emitter.complete();
           return;
         }
         String userId = uidOpt.get();
-        log.info("Java ChatController authorized: userId={}", userId);
-        chatService.handleChatSse(userId, authorization, body, emitter);
+        log.info("chat_authorized traceId={} userId={}", traceId, userId);
+        chatService.handleChatSse(traceId, faultInjectHeader, userId, authorization, body, emitter);
       } catch (Exception e) {
         try {
           String errMsg = e.getMessage() == null ? String.valueOf(e) : e.getMessage();
-          emitter.send(SseEmitter.event().name("error").data(Map.of("error", errMsg)));
+          emitter.send(SseEmitter.event().name("error").data(Map.<String, Object>of("error", errMsg)));
         } catch (Exception ignored) {
         }
         emitter.completeWithError(e);

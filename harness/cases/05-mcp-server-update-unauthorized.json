@@ -1,0 +1,12 @@
+{
+  "name": "mcp-server-update-unauthorized",
+  "path": "/api/mcp/servers/non-exist-id",
+  "method": "PATCH",
+  "includeAuth": false,
+  "body": {
+    "enabled": false
+  },
+  "expectStatus": 401,
+  "expectBodyContains": ["Unauthorized"],
+  "expectTraceId": true
+}

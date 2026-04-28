@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
+import { randomUUID } from 'crypto';
 
 const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -11,10 +12,12 @@ const getJavaBaseUrl = () => {
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
+    const traceId = req.headers.get('x-trace-id')?.trim() || randomUUID();
+    const faultInject = req.headers.get('x-fault-inject')?.trim() || '';
     const token = req.cookies.get('auth-token')?.value;
-    if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!token) return NextResponse.json({ error: 'Unauthorized', traceId }, { status: 401, headers: { 'X-Trace-Id': traceId } });
     const user = getSession(token);
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!user) return NextResponse.json({ error: 'Unauthorized', traceId }, { status: 401, headers: { 'X-Trace-Id': traceId } });
 
     const { id } = await params;
     const body = (await req.json()) as {
@@ -27,11 +30,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const javaBaseUrl = getJavaBaseUrl();
     const resp = await fetch(`${javaBaseUrl}/mcp/servers/${id}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'X-Trace-Id': traceId,
+        ...(faultInject ? { 'X-Fault-Inject': faultInject } : {}),
+      },
       body: JSON.stringify(body),
     });
     const data = await resp.json().catch(() => null);
-    return NextResponse.json(data, { status: resp.status });
+    return NextResponse.json(data, { status: resp.status, headers: { 'X-Trace-Id': traceId } });
   } catch (error: unknown) {
     const msg = getErrorMessage(error);
     const status = msg.includes('not found') ? 404 : 500;
@@ -41,19 +49,25 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
+    const traceId = req.headers.get('x-trace-id')?.trim() || randomUUID();
+    const faultInject = req.headers.get('x-fault-inject')?.trim() || '';
     const token = req.cookies.get('auth-token')?.value;
-    if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!token) return NextResponse.json({ error: 'Unauthorized', traceId }, { status: 401, headers: { 'X-Trace-Id': traceId } });
     const user = getSession(token);
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!user) return NextResponse.json({ error: 'Unauthorized', traceId }, { status: 401, headers: { 'X-Trace-Id': traceId } });
 
     const { id } = await params;
     const javaBaseUrl = getJavaBaseUrl();
     const resp = await fetch(`${javaBaseUrl}/mcp/servers/${id}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-Trace-Id': traceId,
+        ...(faultInject ? { 'X-Fault-Inject': faultInject } : {}),
+      },
     });
     const data = await resp.json().catch(() => null);
-    return NextResponse.json(data, { status: resp.status });
+    return NextResponse.json(data, { status: resp.status, headers: { 'X-Trace-Id': traceId } });
   } catch (error: unknown) {
     const msg = getErrorMessage(error);
     const status = msg.includes('not found') ? 404 : 500;

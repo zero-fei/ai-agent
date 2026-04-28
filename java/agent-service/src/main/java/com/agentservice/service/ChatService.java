@@ -65,6 +65,8 @@ public class ChatService {
   private final JdbcTemplate jdbcTemplate;
   private final ObjectMapper objectMapper;
   private final McpToolService mcpToolService;
+  private final ChatRunService chatRunService;
+  private final FaultInjectionService faultInjectionService;
 
   private final HttpClient httpClient = HttpClient.newHttpClient();
   private final ExecutorService executor = Executors.newFixedThreadPool(16);
@@ -90,21 +92,39 @@ public class ChatService {
   /** 可覆盖 skills 目录（用于读取 skills/*.md） */
   @Value("${SKILLS_DIR:}") private String skillsDirOverride;
 
-  public ChatService(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, McpToolService mcpToolService) {
+  public ChatService(
+      JdbcTemplate jdbcTemplate,
+      ObjectMapper objectMapper,
+      McpToolService mcpToolService,
+      ChatRunService chatRunService,
+      FaultInjectionService faultInjectionService) {
     this.jdbcTemplate = jdbcTemplate;
     this.objectMapper = objectMapper;
     this.mcpToolService = mcpToolService;
+    this.chatRunService = chatRunService;
+    this.faultInjectionService = faultInjectionService;
   }
 
   /**
    * 由 {@link com.agentservice.controller.ChatController} 调用（已鉴权）。
    * 通过 emitter 向前端推送 {@code event: delta/end/error}。
    */
-  public void handleChatSse(String userId, String authorization, ChatRequestBody body, SseEmitter emitter) throws Exception {
+  public void handleChatSse(
+      String traceId,
+      String faultInjectHeader,
+      String userId,
+      String authorization,
+      ChatRequestBody body,
+      SseEmitter emitter) throws Exception {
+    if (body == null) {
+      emitter.send(SseEmitter.event().name("error").data(Map.<String, Object>of("error", "Request body is required")));
+      emitter.complete();
+      return;
+    }
     long requestStartNs = System.nanoTime();
     if (blank(dashscopeApiKey)) {
       // 不泄露 value，只给定位提示
-      emitter.send(SseEmitter.event().name("error").data((Object) Map.of(
+      emitter.send(SseEmitter.event().name("error").data(Map.<String, Object>of(
           "error",
           "未配置 DASHSCOPE_API_KEY：请确保 Java 进程已获得有效的 DASHSCOPE_API_KEY 并重启。"
       )));
@@ -114,7 +134,7 @@ public class ChatService {
 
     List<IncomingMessage> incoming = body == null || body.messages == null ? List.of() : body.messages;
     if (incoming.isEmpty()) {
-      emitter.send(SseEmitter.event().name("error").data((Object) Map.of("error", "Messages are required")));
+      emitter.send(SseEmitter.event().name("error").data(Map.<String, Object>of("error", "Messages are required")));
       emitter.complete();
       return;
     }
@@ -123,6 +143,8 @@ public class ChatService {
     String conversationId = ensureConversation(userId, body.conversationId, incoming);
     String latestUserText = Optional.ofNullable(incoming.get(incoming.size() - 1).content).orElse("");
     saveMessage(conversationId, incoming.get(incoming.size() - 1).role, latestUserText);
+    String runId = chatRunService.startRun(traceId, userId, conversationId);
+    faultInjectionService.raiseIfRequested(faultInjectHeader, "chat.after_run_started");
     long persistUserMs = elapsedMs(startNs);
 
     // Parallel Preflight Tasks: Embedding, Skill, MCP Decision
@@ -180,21 +202,28 @@ public class ChatService {
     long preflightMs = elapsedMs(requestStartNs);
     int totalPromptChars = system.length() + latestUserText.length();
     log.info(
-        "chat_timing_preflight conversationId={} persistUserMs={} preflightMs={} mcpToolMs={} messageCount={} promptChars={}",
-        conversationId, persistUserMs, preflightMs, mcpToolMs, incoming.size(), totalPromptChars);
-    streamAndPersist(userId, latestUserText, msgs, conversationId, emitter, requestStartNs, preflightMs);
+        "chat_timing_preflight traceId={} conversationId={} persistUserMs={} preflightMs={} mcpToolMs={} messageCount={} promptChars={}",
+        traceId, conversationId, persistUserMs, preflightMs, mcpToolMs, incoming.size(), totalPromptChars);
+    try {
+      streamAndPersist(traceId, faultInjectHeader, runId, userId, latestUserText, msgs, conversationId, emitter, requestStartNs, preflightMs);
+    } catch (Exception e) {
+      long totalMs = elapsedMs(requestStartNs);
+      chatRunService.finishError(runId, e.getMessage() == null ? String.valueOf(e) : e.getMessage(), preflightMs, 0L, totalMs);
+      throw e;
+    }
   }
 
   /**
    * 流式调用 LLM（DashScope OpenAI 兼容接口），并在结束后：
    * 写回 messages + 抽取记忆（写入 user_memories）+ 发送 end。
    */
-  private void streamAndPersist(String userId, String latestUserText,
+  private void streamAndPersist(String traceId, String faultInjectHeader, String runId, String userId, String latestUserText,
       List<Map<String, Object>> messages,
       String conversationId,
       SseEmitter emitter,
       long requestStartNs,
       long preflightMs) throws Exception {
+    faultInjectionService.raiseIfRequested(faultInjectHeader, "chat.before_llm_connect");
 
     long startNs = System.nanoTime();
     HttpRequest req = HttpRequest.newBuilder()
@@ -212,9 +241,10 @@ public class ChatService {
     long llmConnectMs = elapsedMs(startNs);
     if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
       long totalMs = elapsedMs(requestStartNs);
-      log.warn("chat_timing_error conversationId={} preflightMs={} llmConnectMs={} totalMs={} status={}",
-          conversationId, preflightMs, llmConnectMs, totalMs, resp.statusCode());
-      emitter.send(SseEmitter.event().name("error").data((Object) Map.of(
+      log.warn("chat_timing_error traceId={} conversationId={} preflightMs={} llmConnectMs={} totalMs={} status={}",
+          traceId, conversationId, preflightMs, llmConnectMs, totalMs, resp.statusCode());
+      chatRunService.finishError(runId, "LLM HTTP " + resp.statusCode(), preflightMs, llmConnectMs, totalMs);
+      emitter.send(SseEmitter.event().name("error").data(Map.<String, Object>of(
           "error", describeLlmHttpFailure(resp.statusCode())
       )));
       emitter.complete();
@@ -247,7 +277,7 @@ public class ChatService {
     saveMessage(conversationId, "assistant", answer);
     long saveAssistantMs = elapsedMs(startNs);
     startNs = System.nanoTime();
-    emitter.send(SseEmitter.event().name("end").data((Object) Map.of("conversationId", conversationId)));
+    emitter.send(SseEmitter.event().name("end").data(Map.<String, Object>of("conversationId", conversationId)));
     emitter.complete();
     long endEmitMs = elapsedMs(startNs);
     long totalMs = elapsedMs(requestStartNs);
@@ -256,17 +286,19 @@ public class ChatService {
     CompletableFuture.runAsync(() -> {
       long mStart = System.nanoTime();
       upsertMemoriesFromTurn(userId, latestUserText, answer);
-      log.info("chat_async_memory_done conversationId={} durationMs={}", conversationId, elapsedMs(mStart));
+      log.info("chat_async_memory_done traceId={} conversationId={} durationMs={}",
+          traceId, conversationId, elapsedMs(mStart));
     }, executor);
 
     if (totalMs >= chatSlowMs) {
       log.warn(
-          "chat_timing_slow conversationId={} preflightMs={} llmConnectMs={} ttftMs={} streamMs={} saveAssistantMs={} endEmitMs={} totalMs={} thresholdMs={} answerChars={}",
-          conversationId, preflightMs, llmConnectMs, ttftMs, streamMs, saveAssistantMs, endEmitMs, totalMs, chatSlowMs, answer.length());
+          "chat_timing_slow traceId={} conversationId={} preflightMs={} llmConnectMs={} ttftMs={} streamMs={} saveAssistantMs={} endEmitMs={} totalMs={} thresholdMs={} answerChars={}",
+          traceId, conversationId, preflightMs, llmConnectMs, ttftMs, streamMs, saveAssistantMs, endEmitMs, totalMs, chatSlowMs, answer.length());
     }
     log.info(
-        "chat_timing_total conversationId={} preflightMs={} llmConnectMs={} ttftMs={} streamMs={} saveAssistantMs={} endEmitMs={} totalMs={} answerChars={}",
-        conversationId, preflightMs, llmConnectMs, ttftMs, streamMs, saveAssistantMs, endEmitMs, totalMs, answer.length());
+        "chat_timing_total traceId={} conversationId={} preflightMs={} llmConnectMs={} ttftMs={} streamMs={} saveAssistantMs={} endEmitMs={} totalMs={} answerChars={}",
+        traceId, conversationId, preflightMs, llmConnectMs, ttftMs, streamMs, saveAssistantMs, endEmitMs, totalMs, answer.length());
+    chatRunService.finishOk(runId, preflightMs, llmConnectMs, totalMs);
   }
 
   /** RAG：对 kb_chunks 按 embedding 相似度排序，取前 5 条拼进 system。 */

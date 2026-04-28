@@ -1,0 +1,9 @@
+{
+  "name": "runs-list-unauthorized",
+  "path": "/api/runs?limit=10",
+  "method": "GET",
+  "includeAuth": false,
+  "expectStatus": 401,
+  "expectBodyContains": ["Unauthorized"],
+  "expectTraceId": true
+}

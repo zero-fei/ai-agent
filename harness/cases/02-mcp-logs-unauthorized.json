@@ -1,0 +1,9 @@
+{
+  "name": "mcp-logs-unauthorized",
+  "path": "/api/mcp/logs?limit=10",
+  "method": "GET",
+  "includeAuth": false,
+  "expectStatus": 401,
+  "expectBodyContains": ["Unauthorized"],
+  "expectTraceId": true
+}

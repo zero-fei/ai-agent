@@ -1,0 +1,9 @@
+{
+  "name": "mcp-server-health-unauthorized",
+  "path": "/api/mcp/servers/non-exist-id/health",
+  "method": "POST",
+  "includeAuth": false,
+  "expectStatus": 401,
+  "expectBodyContains": ["Unauthorized"],
+  "expectTraceId": true
+}

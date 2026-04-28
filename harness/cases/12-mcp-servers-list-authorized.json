@@ -1,0 +1,8 @@
+{
+  "name": "mcp-servers-list-authorized",
+  "path": "/api/mcp/servers",
+  "method": "GET",
+  "requiresToken": true,
+  "expectStatus": 200,
+  "expectTraceId": true
+}

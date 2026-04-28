@@ -1,0 +1,13 @@
+{
+  "name": "mcp-servers-create-unauthorized",
+  "path": "/api/mcp/servers",
+  "method": "POST",
+  "includeAuth": false,
+  "body": {
+    "name": "harness-server",
+    "serverKey": "harness-key"
+  },
+  "expectStatus": 401,
+  "expectBodyContains": ["Unauthorized"],
+  "expectTraceId": true
+}

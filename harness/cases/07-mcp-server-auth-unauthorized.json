@@ -1,0 +1,9 @@
+{
+  "name": "mcp-server-auth-unauthorized",
+  "path": "/api/mcp/servers/non-exist-id/auth",
+  "method": "POST",
+  "includeAuth": false,
+  "expectStatus": 401,
+  "expectBodyContains": ["Unauthorized"],
+  "expectTraceId": true
+}

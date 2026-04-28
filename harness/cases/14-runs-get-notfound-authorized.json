@@ -1,0 +1,8 @@
+{
+  "name": "runs-get-notfound-authorized",
+  "path": "/api/runs/non-exist-id",
+  "method": "GET",
+  "requiresToken": true,
+  "expectStatus": 404,
+  "expectTraceId": true
+}

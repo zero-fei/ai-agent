@@ -1,0 +1,11 @@
+{
+  "name": "mcp-servers-create-badrequest-authorized",
+  "path": "/api/mcp/servers",
+  "method": "POST",
+  "requiresToken": true,
+  "body": {
+    "serverKey": "only-key-without-name"
+  },
+  "expectStatus": 400,
+  "expectTraceId": true
+}

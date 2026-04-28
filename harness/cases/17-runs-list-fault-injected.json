@@ -1,0 +1,12 @@
+{
+  "name": "runs-list-fault-injected",
+  "path": "/api/runs?limit=5",
+  "method": "GET",
+  "requiresToken": true,
+  "requiresFaultInjection": true,
+  "headers": {
+    "X-Fault-Inject": "runs.list"
+  },
+  "expectStatus": 500,
+  "expectTraceId": true
+}

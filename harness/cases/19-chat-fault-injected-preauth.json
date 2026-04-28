@@ -1,0 +1,21 @@
+{
+  "name": "chat-fault-injected-preauth",
+  "path": "/api/chat",
+  "method": "POST",
+  "requiresToken": true,
+  "requiresFaultInjection": true,
+  "headers": {
+    "X-Fault-Inject": "chat.pre_auth"
+  },
+  "body": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "harness fault injection"
+      }
+    ]
+  },
+  "expectStatus": 200,
+  "expectSseEvents": ["error"],
+  "expectTraceId": true
+}

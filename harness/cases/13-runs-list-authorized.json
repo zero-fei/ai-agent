@@ -1,0 +1,8 @@
+{
+  "name": "runs-list-authorized",
+  "path": "/api/runs?limit=10",
+  "method": "GET",
+  "requiresToken": true,
+  "expectStatus": 200,
+  "expectTraceId": true
+}

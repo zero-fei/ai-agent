@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
+import { randomUUID } from 'crypto';
 
 const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -11,18 +12,24 @@ const getJavaBaseUrl = () => {
 
 export async function GET(req: NextRequest) {
   try {
+    const traceId = req.headers.get('x-trace-id')?.trim() || randomUUID();
+    const faultInject = req.headers.get('x-fault-inject')?.trim() || '';
     const token = req.cookies.get('auth-token')?.value;
-    if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!token) return NextResponse.json({ error: 'Unauthorized', traceId }, { status: 401, headers: { 'X-Trace-Id': traceId } });
     const user = getSession(token);
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!user) return NextResponse.json({ error: 'Unauthorized', traceId }, { status: 401, headers: { 'X-Trace-Id': traceId } });
 
     const javaBaseUrl = getJavaBaseUrl();
     const resp = await fetch(`${javaBaseUrl}/mcp/servers`, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-Trace-Id': traceId,
+        ...(faultInject ? { 'X-Fault-Inject': faultInject } : {}),
+      },
     });
     const data = await resp.json().catch(() => null);
-    return NextResponse.json(data, { status: resp.status });
+    return NextResponse.json(data, { status: resp.status, headers: { 'X-Trace-Id': traceId } });
   } catch (error: unknown) {
     console.error('MCP servers GET error:', error);
     return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
@@ -31,10 +38,12 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    const traceId = req.headers.get('x-trace-id')?.trim() || randomUUID();
+    const faultInject = req.headers.get('x-fault-inject')?.trim() || '';
     const token = req.cookies.get('auth-token')?.value;
-    if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!token) return NextResponse.json({ error: 'Unauthorized', traceId }, { status: 401, headers: { 'X-Trace-Id': traceId } });
     const user = getSession(token);
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!user) return NextResponse.json({ error: 'Unauthorized', traceId }, { status: 401, headers: { 'X-Trace-Id': traceId } });
 
     const body = (await req.json()) as {
       name?: string;
@@ -44,8 +53,8 @@ export async function POST(req: NextRequest) {
     };
     const name = body?.name?.trim();
     const serverKey = body?.serverKey?.trim();
-    if (!name) return NextResponse.json({ error: 'name is required' }, { status: 400 });
-    if (!serverKey) return NextResponse.json({ error: 'serverKey is required' }, { status: 400 });
+    if (!name) return NextResponse.json({ error: 'name is required', traceId }, { status: 400, headers: { 'X-Trace-Id': traceId } });
+    if (!serverKey) return NextResponse.json({ error: 'serverKey is required', traceId }, { status: 400, headers: { 'X-Trace-Id': traceId } });
 
     const javaBaseUrl = getJavaBaseUrl();
     const resp = await fetch(`${javaBaseUrl}/mcp/servers`, {
@@ -53,6 +62,8 @@ export async function POST(req: NextRequest) {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
+        'X-Trace-Id': traceId,
+        ...(faultInject ? { 'X-Fault-Inject': faultInject } : {}),
       },
       body: JSON.stringify({
         name,
@@ -62,7 +73,7 @@ export async function POST(req: NextRequest) {
       }),
     });
     const data = await resp.json().catch(() => null);
-    return NextResponse.json(data, { status: resp.status });
+    return NextResponse.json(data, { status: resp.status, headers: { 'X-Trace-Id': traceId } });
   } catch (error: unknown) {
     console.error('MCP servers POST error:', error);
     return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });

@@ -1,0 +1,17 @@
+{
+  "name": "chat-unauthorized",
+  "path": "/api/chat",
+  "method": "POST",
+  "includeAuth": false,
+  "body": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "hello"
+      }
+    ]
+  },
+  "expectStatus": 401,
+  "expectBodyContains": ["Unauthorized"],
+  "expectTraceId": true
+}

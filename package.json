@@ -6,6 +6,11 @@
     "dev": "next dev --webpack",
     "dev:java": "mvn -f java/agent-service/pom.xml -DskipTests spring-boot:run",
     "dev:all": "concurrently -k -n next,java -c blue,green \"npm run dev\" \"npm run dev:java\"",
+    "harness": "pwsh ./harness/run-harness.ps1",
+    "harness:fault": "pwsh ./harness/run-harness.ps1 -EnableFaultInjection",
+    "harness:llm": "pwsh ./harness/run-harness.ps1 -EnableLlmCases",
+    "harness:full": "npm run harness && npm run harness:fault && npm run harness:llm",
+    "harness:ci": "pwsh ./scripts/harness-ci.ps1",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"

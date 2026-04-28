@@ -1,0 +1,9 @@
+{
+  "name": "mcp-server-delete-unauthorized",
+  "path": "/api/mcp/servers/non-exist-id",
+  "method": "DELETE",
+  "includeAuth": false,
+  "expectStatus": 401,
+  "expectBodyContains": ["Unauthorized"],
+  "expectTraceId": true
+}

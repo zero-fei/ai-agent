@@ -1,0 +1,18 @@
+{
+  "name": "chat-happy-authorized-llm",
+  "path": "/api/chat",
+  "method": "POST",
+  "requiresToken": true,
+  "requiresLlm": true,
+  "body": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "请用一句话回答：今天天气不错。"
+      }
+    ]
+  },
+  "expectStatus": 200,
+  "expectSseEvents": ["delta", "end"],
+  "expectTraceId": true
+}
