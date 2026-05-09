@@ -2,6 +2,8 @@
 
 一个基于 **Next.js App Router** 的「对话式 AI Agent」Web 应用，内置登录/注册、会话管理、对话历史、流式输出，并已接入 **MCP 管理 + 工具调用** 与 **RAG 知识库**。
 
+**架构概要**：浏览器与前端只访问 Next；对话、MCP 管理、回放摘要等由 Next 的 `src/app/api/*` 作为 BFF **代理**到 **Java `agent-service`**（默认 `http://localhost:18081`）。请求链路透传 **`X-Trace-Id`**，便于日志关联。项目内提供 **Harness 分层回归**（`harness/`）与可选的 **GitHub Actions** 工作流（`.github/workflows/harness.yml`）。详细用法见 [harness/README.md](harness/README.md)。
+
 ### 技术栈
 
 - **框架**：Next.js 16（App Router / Route Handlers）
@@ -90,7 +92,7 @@ Skill 不走数据库，统一存放在项目目录 `skills/*.md`，并采用固
 
 当前实现为“手动选择 Skill”：仅当传入 `skillName` 时，Java 会读取 `skills/{skillName}.md` 内容并注入 system prompt。
 
-后端实现位置：[ChatService.java](file:///f:/huya/kefu/zx-ai-agent/agent-app/java/agent-service/src/main/java/com/agentservice/service/ChatService.java)
+后端实现位置：[ChatService.java](java/agent-service/src/main/java/com/agentservice/service/ChatService.java)
 
 ### 本地启动（Next + Java Agent Service）
 
@@ -134,7 +136,7 @@ MCP_DIRECT_BRIDGE_URL=http://localhost:8787/mcp/call
 
 **注意：聊天与记忆抽取由 Java 直连 DashScope 兼容接口**，`DASHSCOPE_API_KEY` 等必须对 **Java 进程**生效。本项目会在 Java 启动时尝试从项目根目录向上查找 `.env.local` 并注入为 JVM System properties（不打印 value），便于本地开发。
 
-实现位置：[AgentServiceApplication.java](file:///f:/huya/kefu/zx-ai-agent/agent-app/java/agent-service/src/main/java/com/agentservice/AgentServiceApplication.java)
+实现位置：[AgentServiceApplication.java](java/agent-service/src/main/java/com/agentservice/AgentServiceApplication.java)
 
 ```bash
 # 示例（与 .env.local 中 key 保持一致）
@@ -173,6 +175,26 @@ npm run dev:all
 
 打开 `http://localhost:3000`。
 
+### Java 健康检查与启动校验
+
+- **存活**：`GET http://localhost:18081/healthz`
+- **就绪**（会检查数据库与 LLM Key 等）：`GET http://localhost:18081/readyz`
+- **启动**：若未配置 `DASHSCOPE_API_KEY`，默认会 **fail-fast**；本地仅跑 MCP/管理接口时可设 `ALLOW_MISSING_LLM_KEY=true` 跳过（见 [StartupConfigValidator.java](java/agent-service/src/main/java/com/agentservice/service/StartupConfigValidator.java)）。
+
+### 回放摘要（chat_runs）
+
+Java 侧会记录每次对话运行的摘要（状态、耗时等），可通过：
+
+- `GET /runs`、`GET /runs/{id}`（需 `Authorization: Bearer <token>`）
+
+Next 已代理为：
+
+- `GET /api/runs`、`GET /api/runs/{id}`
+
+### 故障注入（开发/测试）
+
+开启 `HARNESS_FAULT_INJECTION_ENABLED=true` 后，可在请求头携带 **`X-Fault-Inject`**（逗号分隔故障点，如 `chat.pre_auth`、`mcp.logs.list`），用于演练失败路径。详见 [harness/README.md](harness/README.md) 与 Java [FaultInjectionService.java](java/agent-service/src/main/java/com/agentservice/service/FaultInjectionService.java)。
+
 ### 性能与日志（排查“为什么慢”）
 
 Java 侧会输出分阶段耗时日志，推荐用来定位是“前置处理慢”还是“模型首字慢”：
@@ -188,6 +210,8 @@ Java 侧会输出分阶段耗时日志，推荐用来定位是“前置处理慢
 - `chat_timing_slow`：当 `totalMs >= CHAT_SLOW_MS` 时输出告警
 - `chat_async_memory_done`：异步记忆抽取耗时（不会阻塞用户看到回答结束）
 
+日志中请优先按 **`traceId`**（与响应头 **`X-Trace-Id`** 一致）串联 Next 与 Java 的同一请求。
+
 ### 常用脚本
 
 ```bash
@@ -200,6 +224,13 @@ npm run dev:java
 # Next + Java 并行（Ctrl+C 会结束两个进程）
 npm run dev:all
 
+# Harness 回归（需已安装 PowerShell / pwsh；默认打 http://localhost:3000）
+npm run harness
+npm run harness:fault    # 需 Java 开启 HARNESS_FAULT_INJECTION_ENABLED
+npm run harness:llm      # 需有效 DASHSCOPE_API_KEY 等
+npm run harness:full     # 串行：base + fault + llm
+npm run harness:ci       # CI 包装：见 scripts/harness-ci.ps1 与环境变量 HARNESS_*
+
 # 构建
 npm run build
 
@@ -209,6 +240,8 @@ npm run start
 # 代码规范检查
 npm run lint
 ```
+
+更完整的用例说明、登录参数与 CI Secrets 配置见 [harness/README.md](harness/README.md)。
 
 ### 目录结构（简要）
 
@@ -221,10 +254,14 @@ npm run lint
 - `src/lib/mcp.ts`：MCP Server 管理、工具执行、日志（java_only）
 - `src/lib/rag.ts`：RAG 入库/检索与 prompt 构建
 - `java/agent-service/*`：Java 侧 Agent 后端（chat/mcp/memory/rag）
+- `harness/*`：分层回归用例与 `run-harness.ps1`
+- `scripts/harness-ci.ps1`：CI 用多阶段执行入口
+- `.github/workflows/harness.yml`：GitHub Actions 示例（PR 路径过滤 + 手动触发 fault/llm）
 
 ### 说明与约束
 
-- **数据库**：默认使用本地 SQLite 文件（仓库中可见 `database.db`）。生产部署建议使用持久化存储，并按需迁移到独立 DB 服务。
+- **数据库**：Next 与 Java 各自使用本地 **SQLite**（如根目录 `database.db`、`java/agent-service` 下运行时生成的 `*.db`）。这些文件已列入 **`.gitignore`**，**不会提交到仓库**；克隆后首次运行会自动建库。生产部署请使用持久化卷或迁移到独立 DB。
+- **构建产物**：`java/**/target/` 已忽略，请勿将 Maven 编译输出提交到 Git。
 - **鉴权**：API 主要通过 `auth-token` cookie 识别用户，会话在请求中会自动续期。
 - **消息角色**：LLM 输入目前只接收 `user/assistant` 角色（会过滤掉其它 role），如需 `system` 消息请同步扩展 `src/lib/llm.ts` 的消息类型与 prompt 组装逻辑。
 - **System Prompt 规则**：`defaultSystemPrompt` 始终在前，API 传入的 `systemPrompt` 会拼接在后。
