@@ -20,8 +20,12 @@
 # production
 /build
 
-# java build outputs
-/java/**/target/
+# java build outputs（Maven）
+java/**/target/
+**/target/
+
+# 本地 SQLite / 运行时数据库（勿提交）
+*.db
 
 # misc
 .DS_Store
