@@ -164,9 +164,13 @@ foreach ($f in $caseFiles) {
     $eventText = [string]$resp.Content
     $ok = $true
   } catch {
-    if ($_.Exception.Response) {
-      $status = [int]$_.Exception.Response.StatusCode.value__
-      $traceId = Get-HeaderValueSafe -Headers $_.Exception.Response.Headers -Name "X-Trace-Id"
+    $respObj = $null
+    if ($null -ne $_.Exception -and $null -ne $_.Exception.psobject.Properties["Response"]) {
+      $respObj = $_.Exception.Response
+    }
+    if ($null -ne $respObj) {
+      $status = [int]$respObj.StatusCode.value__
+      $traceId = Get-HeaderValueSafe -Headers $respObj.Headers -Name "X-Trace-Id"
     }
     $errMsg = $_.Exception.Message
   }
