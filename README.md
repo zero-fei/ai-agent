@@ -138,6 +138,8 @@ MCP_DIRECT_BRIDGE_URL=http://localhost:8787/mcp/call
 
 实现位置：[AgentServiceApplication.java](java/agent-service/src/main/java/com/agentservice/AgentServiceApplication.java)
 
+**SQLite 与 Next 对齐**：Java 启动前会自动解析仓库根目录下的 `database.db`（与 Next 的 `path.resolve(process.cwd(), 'database.db')` 一致）。因此即使在 `java/agent-service` 目录下执行 `mvn spring-boot:run`，也不会再误连到子目录里的空库，从而避免 `chat_unauthorized`（有 Bearer 但查不到 `sessions`）。生产环境仍建议显式配置绝对路径 **`DB_PATH`**。
+
 ```bash
 # 示例（与 .env.local 中 key 保持一致）
 export DASHSCOPE_API_KEY=你的Key
@@ -260,7 +262,7 @@ npm run lint
 
 ### 说明与约束
 
-- **数据库**：Next 与 Java 各自使用本地 **SQLite**（如根目录 `database.db`、`java/agent-service` 下运行时生成的 `*.db`）。这些文件已列入 **`.gitignore`**，**不会提交到仓库**；克隆后首次运行会自动建库。生产部署请使用持久化卷或迁移到独立 DB。
+- **数据库**：Next 使用仓库根目录 **`database.db`**。Java 默认也会对齐到同一路径（见上）；若需单独库文件，请设置绝对路径 **`DB_PATH`**。这些 `*.db` 已列入 **`.gitignore`**，不会提交到仓库。生产部署请使用持久化卷或迁移到独立 DB。
 - **构建产物**：`java/**/target/` 已忽略，请勿将 Maven 编译输出提交到 Git。
 - **鉴权**：API 主要通过 `auth-token` cookie 识别用户，会话在请求中会自动续期。
 - **消息角色**：LLM 输入目前只接收 `user/assistant` 角色（会过滤掉其它 role），如需 `system` 消息请同步扩展 `src/lib/llm.ts` 的消息类型与 prompt 组装逻辑。
