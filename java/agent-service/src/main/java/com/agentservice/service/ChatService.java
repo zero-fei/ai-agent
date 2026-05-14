@@ -37,16 +37,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * 聊天核心业务：
  *
  * <ul>
  *   <li>入参消息落库到 SQLite（conversation/messages）</li>
- *   <li>构建 system 提示：RAG 知识库 + 长期记忆 + 可选 Skill 文件</li>
+ *   <li>构建 system 提示：RAG 知识库 + 用户背景事实 + 可选 Skill 文件</li>
  *   <li>决定是否调用 MCP 工具（手动 @mcp / 启发式 / LLM JSON 决策）</li>
  *   <li>流式请求 LLM（SSE: delta/end/error）并把结果写回 messages</li>
- *   <li>对每轮对话抽取长期记忆并写入 user_memories</li>
+ *   <li>对每轮对话抽取用户背景事实并写入 user_memories</li>
  * </ul>
  */
 @Service
@@ -177,7 +178,12 @@ public class ChatService {
     String memoryPrompt = memoryFuture.join();
     String skillPrompt = skillFuture.join();
 
-    String system = merge("你是一个严谨助手。", ragPrompt, memoryPrompt, skillPrompt);
+    String system = merge(
+        "你是一个严谨助手。与用户对话时遵守："
+            + "不要在回复中出现「长期记忆」「根据…记忆」「咱们的记忆」「想起你说过」「存档里」等措辞；"
+            + "不要复述或引用本 system 里用于约束你的说明性文字；"
+            + "对用户称呼、偏好、职业等背景信息请自然融入，就像你一直知道一样，不要交代这些信息从何而来。",
+        ragPrompt, memoryPrompt, skillPrompt);
 
     // 构建给 LLM 的 messages：system + 历史 user/assistant
     List<Map<String, Object>> msgs = new ArrayList<>();
@@ -327,7 +333,10 @@ public class ChatService {
     }
   }
 
-  /** Memory：从 user_memories 里挑相似度 >= 0.35 的若干条拼进 system。 */
+  /**
+   * Memory：从 user_memories 里挑相似度 >= 0.35 的若干条拼进 system。
+   * 不使用「长期记忆」等易被模型照读进用户可见回复的字样；事实以列表形式给出。
+   */
   private String buildMemoryPrompt(String userId, double[] queryEmbedding) {
     try {
       if (queryEmbedding.length == 0) return null;
@@ -342,7 +351,10 @@ public class ChatService {
         if (s >= 0.35) memories.add(Objects.toString(r.get("content"), ""));
       }
       if (memories.isEmpty()) return null;
-      return "长期记忆：\\n" + String.join("\\n", memories.subList(0, Math.min(5, memories.size())));
+      List<String> top = memories.subList(0, Math.min(5, memories.size()));
+      return top.stream()
+          .map(m -> "- " + m.trim())
+          .collect(Collectors.joining("\n"));
     } catch (Exception e) {
       return null;
     }
@@ -583,8 +595,10 @@ public class ChatService {
     String url = trim(effectiveChatBaseUrl()) + "/chat/completions";
     List<Map<String, Object>> memMsgs = List.of(
         Map.of("role", "system", "content",
-            "你是长期记忆抽取器。输出 JSON 数组：[{memoryType,content,source}]，最多5条；无结果输出[]。"),
-        Map.of("role", "user", "content", "请抽取长期记忆：\n" + userText + "\n\n" + assistantText)
+            "你是用户背景事实抽取器。输出 JSON 数组：[{memoryType,content,source}]，最多5条；无则输出[]。"
+                + "content 只写简短、可复用的事实（称呼、职业、技术偏好等），每条一条信息；"
+                + "禁止在 content 里写「用户说」「用户希望」「长期记忆」「记住」等元话语或对话式复述。"),
+        Map.of("role", "user", "content", "请从以下对话抽取可复用的背景事实：\n" + userText + "\n\n" + assistantText)
     );
 
     Map<String, Object> payload = Map.of(
