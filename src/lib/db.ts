@@ -20,6 +20,13 @@ const db = new Database(dbPath, { verbose: console.log });
 
 // SQLite 默认不启用外键约束，这里显式开启以确保 ON DELETE CASCADE 生效。
 db.pragma('foreign_keys = ON');
+// Next 与 Java 可能同时访问同一 database.db，降低锁竞争与 SQLITE_BUSY
+try {
+  db.pragma('journal_mode = WAL');
+} catch {
+  // 部分环境或只读卷可能不支持 WAL
+}
+db.pragma('busy_timeout = 10000');
 
 // Use singleton pattern to ensure only one database connection is active.
 // This is a simplified approach for Next.js where modules can be re-evaluated.

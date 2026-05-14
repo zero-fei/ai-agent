@@ -29,8 +29,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const messages = stmt.all(conversationId);
     return NextResponse.json(messages);
   } catch (error: unknown) {
-    console.error(`Failed to fetch messages for conversation:`, getErrorMessage(error));
-    return NextResponse.json({ error: 'Failed to fetch messages' }, { status: 500 });
+    const msg = getErrorMessage(error);
+    console.error(`Failed to fetch messages for conversation:`, msg);
+    return NextResponse.json({ error: 'Failed to fetch messages', detail: msg }, { status: 500 });
   }
 }
 

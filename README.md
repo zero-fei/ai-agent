@@ -262,7 +262,7 @@ npm run lint
 
 ### 说明与约束
 
-- **数据库**：Next 使用仓库根目录 **`database.db`**。Java 默认也会对齐到同一路径（见上）；若需单独库文件，请设置绝对路径 **`DB_PATH`**。这些 `*.db` 已列入 **`.gitignore`**，不会提交到仓库。生产部署请使用持久化卷或迁移到独立 DB。
+- **数据库**：Next 使用仓库根目录 **`database.db`**。Java 默认也会对齐到同一路径（见上）；若需单独库文件，请设置绝对路径 **`DB_PATH`**。这些 `*.db` 已列入 **`.gitignore`**，不会提交到仓库。Next 侧已启用 **WAL + busy_timeout**，Java JDBC URL 带 **`busy_timeout`**，减轻两端同时读写时的 **`SQLITE_BUSY`**（若仍出现「Failed to fetch messages」，请重启 Next/Java 使 pragma 生效）。生产部署请使用持久化卷或迁移到独立 DB。
 - **构建产物**：`java/**/target/` 已忽略，请勿将 Maven 编译输出提交到 Git。
 - **鉴权**：API 主要通过 `auth-token` cookie 识别用户，会话在请求中会自动续期。
 - **消息角色**：LLM 输入目前只接收 `user/assistant` 角色（会过滤掉其它 role），如需 `system` 消息请同步扩展 `src/lib/llm.ts` 的消息类型与 prompt 组装逻辑。

@@ -247,9 +247,15 @@ const AgentPage = () => {
     setPageLoading(true);
     try {
       const response = await fetch(`/api/conversations/${conversationId}`);
-      if (!response.ok) throw new Error('Failed to fetch messages');
-      const data = (await response.json()) as MessageRow[];
-      const formattedMessages: Message[] = data.map((msg) => ({
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        const body = data as { error?: string; detail?: string } | null;
+        const base = body?.error || 'Failed to fetch messages';
+        const detail = body?.detail;
+        throw new Error(detail ? `${base}: ${detail}` : base);
+      }
+      const rows = Array.isArray(data) ? (data as MessageRow[]) : [];
+      const formattedMessages: Message[] = rows.map((msg) => ({
         id: msg.id,
         text: msg.content,
         sender: msg.role === 'user' ? 'user' : 'agent',

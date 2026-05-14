@@ -24,7 +24,12 @@ public class DbConfig {
   public DataSource dataSource() {
     DriverManagerDataSource ds = new DriverManagerDataSource();
     ds.setDriverClassName("org.sqlite.JDBC");
-    ds.setUrl("jdbc:sqlite:" + dbPath);
+    String normalized = dbPath.trim().replace('\\', '/');
+    String sep = normalized.contains("?") ? "&" : "?";
+    String url = normalized.toLowerCase().contains("busy_timeout=")
+        ? "jdbc:sqlite:" + normalized
+        : "jdbc:sqlite:" + normalized + sep + "busy_timeout=10000";
+    ds.setUrl(url);
     return ds;
   }
 }
