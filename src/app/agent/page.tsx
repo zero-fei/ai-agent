@@ -1,6 +1,6 @@
 "use client";
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Layout, Input, Typography, Alert, Menu, Button, Divider, Spin, Avatar, Select, Modal, AutoComplete, Tag } from 'antd';
+import { Layout, Input, Typography, Alert, Menu, Button, Divider, Spin, Avatar, Select, Modal, AutoComplete, Tag, Checkbox } from 'antd';
 import { PlusOutlined, DatabaseOutlined, BookOutlined, MessageOutlined, MenuUnfoldOutlined, MenuFoldOutlined, LogoutOutlined, UserOutlined, ArrowUpOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import Image from 'next/image';
 import ChatMessage from './ChatMessage';
@@ -84,6 +84,8 @@ const AgentPage = () => {
   const [renameConversationId, setRenameConversationId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
   const [renameLoading, setRenameLoading] = useState(false);
+  const [historyBatchMode, setHistoryBatchMode] = useState(false);
+  const [selectedConversationIds, setSelectedConversationIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -239,6 +241,86 @@ const AgentPage = () => {
     });
   };
 
+  const exitHistoryBatchMode = useCallback(() => {
+    setHistoryBatchMode(false);
+    setSelectedConversationIds(new Set());
+  }, []);
+
+  const toggleConversationSelect = (conversationId: string) => {
+    setSelectedConversationIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(conversationId)) next.delete(conversationId);
+      else next.add(conversationId);
+      return next;
+    });
+  };
+
+  const selectAllHistoryConversations = () => {
+    setSelectedConversationIds(new Set(history.map((h) => h.id)));
+  };
+
+  const handleBatchDeleteConversations = () => {
+    const ids = [...selectedConversationIds];
+    if (ids.length === 0) return;
+
+    Modal.confirm({
+      title: `删除选中的 ${ids.length} 个会话？`,
+      content: '删除后会清理这些会话下的全部消息，且不可恢复。',
+      okText: '删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await fetch('/api/conversations/batch-delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids }),
+          });
+          const data = await res.json().catch(() => null);
+          if (!res.ok) {
+            const msg =
+              (data && typeof data === 'object' && data !== null && 'error' in data
+                ? String((data as { error?: string }).error)
+                : 'Failed to batch-delete') +
+              (data &&
+              typeof data === 'object' &&
+              data !== null &&
+              'detail' in data &&
+              (data as { detail?: string }).detail
+                ? `: ${String((data as { detail?: string }).detail)}`
+                : '');
+            throw new Error(msg);
+          }
+
+          if (currentConversationId && ids.includes(currentConversationId)) {
+            handleNewConversation();
+          }
+
+          exitHistoryBatchMode();
+          await fetchHistory();
+        } catch (err: unknown) {
+          setError(getErrorMessage(err));
+        }
+      },
+    });
+  };
+
+  useEffect(() => {
+    if (collapsed) exitHistoryBatchMode();
+  }, [collapsed, exitHistoryBatchMode]);
+
+  useEffect(() => {
+    setSelectedConversationIds((prev) => {
+      if (prev.size === 0) return prev;
+      const valid = new Set(history.map((h) => h.id));
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (valid.has(id)) next.add(id);
+      }
+      return next.size === prev.size ? prev : next;
+    });
+  }, [history]);
+
   const handleSelectConversation = async (conversationId: string) => {
     setCurrentConversationId(conversationId);
     setMessages([]);
@@ -374,7 +456,7 @@ const AgentPage = () => {
 
           const lines = frame.split('\n').map((l) => l.replace(/\r$/, ''));
           let eventName: string | null = null;
-          let dataLines: string[] = [];
+          const dataLines: string[] = [];
           for (const line of lines) {
             if (line.startsWith('event:')) {
               eventName = line.slice(6).trim();
@@ -550,21 +632,92 @@ const AgentPage = () => {
             { key: 'skills', icon: <ThunderboltOutlined />, label: 'Skill 管理' },
         ]}/>
         <Divider className={styles.siderDivider} />
+        {!collapsed && (
+          <div
+            className={
+              historyBatchMode
+                ? `${styles.historyBatchToolbar} ${styles.historyBatchToolbarActive}`
+                : `${styles.historyBatchToolbar} ${styles.historyBatchToolbarIdle}`
+            }
+          >
+            {historyBatchMode ? (
+              <>
+                <Button
+                  type="text"
+                  size="small"
+                  className={styles.historyToolbarDone}
+                  onClick={exitHistoryBatchMode}
+                >
+                  完成
+                </Button>
+                <span className={styles.historyBatchMeta} aria-live="polite">
+                  已选 {selectedConversationIds.size} 条
+                </span>
+                <div className={styles.historyBatchToolbarRight}>
+                  <Button
+                    size="small"
+                    className={styles.historyToolbarSecondary}
+                    onClick={selectAllHistoryConversations}
+                    disabled={history.length === 0}
+                  >
+                    全选
+                  </Button>
+                  <Button
+                    size="small"
+                    danger
+                    className={styles.historyToolbarDanger}
+                    disabled={selectedConversationIds.size === 0}
+                    onClick={handleBatchDeleteConversations}
+                  >
+                    删除
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <Button
+                type="text"
+                size="small"
+                className={styles.historyManageEntry}
+                onClick={() => setHistoryBatchMode(true)}
+                disabled={history.length === 0}
+              >
+                批量管理
+              </Button>
+            )}
+          </div>
+        )}
         <div className={styles.historyList}>
           {history.map(item => (
             <div
               key={item.id}
-              onClick={() => handleSelectConversation(item.id)}
+              onClick={() => {
+                if (historyBatchMode && !collapsed) toggleConversationSelect(item.id);
+                else void handleSelectConversation(item.id);
+              }}
               className={[
                 'history-item',
                 styles.historyItem,
                 collapsed ? styles.historyItemCollapsed : '',
+                historyBatchMode && !collapsed ? styles.historyItemBatch : '',
+                historyBatchMode &&
+                !collapsed &&
+                selectedConversationIds.has(item.id)
+                  ? styles.historyItemSelected
+                  : '',
                 currentConversationId === item.id ? styles.historyItemActive : '',
               ].filter(Boolean).join(' ')}
             >
-              <MessageOutlined />
+              {historyBatchMode && !collapsed ? (
+                <Checkbox
+                  checked={selectedConversationIds.has(item.id)}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={() => toggleConversationSelect(item.id)}
+                />
+              ) : (
+                <MessageOutlined />
+              )}
               {!collapsed && <Typography.Text ellipsis className={styles.historyTitle}>{item.title}</Typography.Text>}
-              {!collapsed && (
+              {!collapsed && !historyBatchMode && (
                 <div className={styles.historyItemActions}>
                   <Button
                     type="text"
